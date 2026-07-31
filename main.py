@@ -8,7 +8,6 @@ import random
 import google_sheet
 import csv
 import json
-from classes import User
 from pathlib import Path
 from colorama import Fore, Style, init
 import pdf
@@ -20,8 +19,8 @@ token = os.getenv("DISCORD_TOKEN")
 
 handler = logging.FileHandler(filename="discord.log", encoding="utf-8", mode="w")
 
-medium_perm = "Heidrun's Bekanta"
-high_perm = "Heidrun's Vän"
+medium_perm = "Heidruns Bekanta"
+high_perm = "Heidruns Vän"
 
 channel_ids = {}
 user_ids = {}       # guild_id: {username: id}
@@ -215,7 +214,29 @@ async def on_ready():
 async def on_member_join(member):
     await member.send(f"Salvete, {member.name}. Benedicat te hircus sanctus. Se till att du läser reglerna får våran kära server. Glöm inte att byta ditt discord namn på servern till ditt riktiga namn, och gör gärna onboardingen så att du får lite roller.")
 
+@bot.event
+async def on_guild_join(guild):
+    log("NOTICE", f"Heidrun har gått med i guild {guild.id}, påbörjar setup.")
+    roles = ["Heidruns Vän", "Heidruns Bekanta", "Heidruns Följare"]
+    for role in roles:
+        if not discord.utils.get(guild.roles, name=role):
+            log("NOTICE", f"Roll {role} ej registrerad, skapar roll...")
+            await guild.create_role(name=role, colour=discord.Colour.dark_red)
+            log("SUCCESS", f"Skapade roll {role} för guild {guild.id}")
+
+    owner = guild.owner
+    if owner is None:
+        owner = await bot.fetch_user(guild.owner_id)
+    try:
+        await owner.send(f"Goddag kära vän, tack för att jag fick gå med i din server {guild.name}. Jag har påbörjat en process att skapa relevanta roller och annat skit som krävs för att jag ska fungera.\n\nNi kan kalla på mig genom att börja ditt meddelande med ett **!**. För att använda commandon som påverkar servern krävs det att man har rollen *Heidruns Vän*. Notera att denna roll ger användaren behörighet till alla mina kommandon.\n\n För att kunna använda notisfunktioner krävs det att ni registrerar kanaler med hjälp av *!register announcment* kommandot.\n\nFör en lista med alla kommandon, skriv *!help*.")
+    except discord.Forbidden:
+        log("FAILURE", f"Jag hade inte tillåtelse att skicka DM till ägaren för {guild.id}")
+
 # COMMANDS
+@bot.command()
+async def help(ctx):
+    pass
+
 @bot.command()
 async def dd1310(ctx):
     role = discord.utils.get(ctx.guild.roles, name="Daniel's Lärjung")
@@ -231,7 +252,7 @@ async def dd1310(ctx):
 
 @bot.command()
 async def notis(ctx):
-    role = discord.utils.get(ctx.guild.roles, name="Heidrun's Följare")
+    role = discord.utils.get(ctx.guild.roles, name="Heidruns Följare")
     if not role:
         await ctx.send("Jag kunde tyvärr inte hitta den rollen...")
         return
@@ -480,6 +501,9 @@ async def register(ctx, r_type: str, tag: str = None, value: discord.TextChannel
         if channels.get(r_type) is None:
             announcement_channels[ctx.guild.id][r_type] = {}
     if r_type == "announcement" and tag is not None and value is not None:
+        perm = discord.utils.get(ctx.guild.roles, name=high_perm)
+        if perm not in ctx.author.roles:
+            await ctx.send("Vem tror du att du är? Du har förbanne mig inte tillåtelse att använda det kommandot.")
         channels = announcement_channels[ctx.guild.id]
         if channels[r_type].get(tag) is None:
             announcement_channels[ctx.guild.id][r_type][tag] = value.id
@@ -509,13 +533,24 @@ async def registration(ctx, tag):
     elif tag == "info":
         user = user_info.get(ctx.author.id)
         if user is None:
-            await ctx.send(f"Du har ännu inte registrerat dig. Använd *!register info* för att registrera dig.")
+            await ctx.send("Du har ännu inte registrerat dig. Använd *!register info* för att registrera dig.")
         else:
             await ctx.send(f"# Registration {ctx.author.name}\n**Name:** {user["name"]}\n**Telefonnummer:** {user["number"]}\n**Mail:** {user["mail"]}\n**Bank:** {user["bank"]}\n**Clearing Nummer:** {user["cnumber"]}\n**Kontonummer:** {user["anumber"]}")
 
 @bot.command()
 async def reimbursement(ctx, place, recipient, total, *, description):
     log("NOTICE", f"Förbereder ersättningsblankett för {ctx.author.id}")
+    if not ctx.message.attachments:
+        await ctx.send("Hur tänker du att jag ska skapa en ersättningsblankett om du inte ens skickar kvittot?")
+        log("WARNING", "Kunde inte skapa ersättningsblankett pågrund av bristande verifikationer.")
+        return
+    
+    receipt = ctx.message.attachments[0]
+    if receipt.content_type is None or not receipt.content_type.startswith("image/"):
+        await ctx.send("Kvittot måste vara en bild (PNG, JPG, JPEG, etc.).")
+        return
+    receipt_path = f"receipt-{ctx.author.id}.png"
+
     def check(message):
         return (message.author == ctx.author)
     try:
@@ -537,15 +572,17 @@ async def reimbursement(ctx, place, recipient, total, *, description):
         data = user_info.get(ctx.author.id)
         if data is None:
             await ctx.send("Du har inte registrerat din information. Kalla inte på mig igen förens du gjort det... *!register info*.")
-        pdf.create_reimbursement(ctx.author, True, place, data["name"], data["number"], data["mail"], data["bank"], data["cnumber"], data["anumber"], recipient, total, description)
+        await receipt.save(receipt_path)
+        pdf.create_reimbursement(ctx.author, True, place, data["name"], data["number"], data["mail"], data["bank"], data["cnumber"], data["anumber"], recipient, total, description, receipt_path)
         filepath = Path(f"reimbursement-{ctx.author.id}.pdf")
+        receipt = Path(receipt_path)
         log("SUCCESS", f"Ersättningsblankett skapad för individ {ctx.author.id}.")
     except TimeoutError:
             await ctx.send(f"{ctx.author.mention} Jag har inte all tid i världen... Skriv igen senare om du fortfarande är intereserad, sluta slösa min tid.")
             return
 
     try:
-        await ctx.send("Okej, jag har nu skapat en ersättningsblankett åt dig. Kom ihåg att du måste ge den till rätt attestant:", file=discord.File(f"reimbursement-{ctx.author.id}.pdf"))
+        await ctx.send(f"{ctx.author.mention} Okej, jag har nu skapat en ersättningsblankett åt dig. Kom ihåg att du måste ge den till rätt attestant:", file=discord.File(f"reimbursement-{ctx.author.id}.pdf"))
     finally:
         log("NOTICE", f"Raderar Erästtningsblankett för användare {ctx.author.id}.")
         if os.path.exists(filepath):
@@ -553,6 +590,12 @@ async def reimbursement(ctx, place, recipient, total, *, description):
             log("SUCCESS", "Lyckad, fil har raderats.")
         else:
             log("FAILURE", f"Kunde inte hitta fil {filepath}")
+        if os.path.exists(receipt):
+            os.remove(receipt)
+            log("SUCCESS", "Lyckad, verifikation har raderats.")
+        else:
+            log("FAILURE", f"Kunde inte hitta verifikation {receipt}")
+        
         
 # ERRORS
         
@@ -578,9 +621,9 @@ async def remind_event():
                 minutes = int(time_left.total_seconds() // 60)
                 version_first = random.randint(1, 5)
                 version_second = random.randint(1, 5)
-                role = discord.utils.get(guild.roles, name="Heidrun's Följare")
+                role = discord.utils.get(guild.roles, name="Heidruns Följare")
                 if not role:
-                    log("WARNING", "Ingen notisroll finns för Heidrun's Följare, skippar...")
+                    log("WARNING", "Ingen notisroll finns för Heidruns Följare, skippar...")
                     continue
                 if minutes < 0:
                     log("WARNING", f"Event {event.name} har redan börjat eller varit, skippar...")
