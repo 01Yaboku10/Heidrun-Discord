@@ -1,0 +1,9 @@
+guild_credentials.json
+user_info.json
+registrations.json
+auths/
+pfp.png
+discord.log
+.env
+__pycache__/
+previous_projects.csv
