@@ -13,6 +13,8 @@ from colorama import Fore, Style, init
 import pdf
 import pymupdf
 from typing import Any
+import qrcode
+from PIL import Image
 
 init(autoreset=True)
 
@@ -232,6 +234,31 @@ def pdf_to_image(pdf, prefix):
         paths.append(path)
     document.close()
     return paths
+
+async def qr_gen(name, link, img, color):
+    try:
+        logo = Image.open(img).convert("RGBA")
+        basewidth = 100
+        buffer = 10
+        wpercent = (basewidth/float(logo.size[0]))
+        hsize = int((float(logo.size[1])*float(wpercent)))
+        logo = logo.resize((basewidth, hsize), Image.Resampling.LANCZOS)
+        buffer_width = logo.width + buffer * 2
+        buffer_height = logo.height + buffer * 2
+        logo_bg = Image.new("RGBA", (buffer_width, buffer_height), "white")
+        logo_bg.paste(logo, (buffer, buffer), logo)
+        qr_code = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H)
+        qr_code.add_data(link)
+        qr_code.make()
+        qr_color = color
+        qr_img = qr_code.make_image(fill_color=qr_color, back_color="white")
+        pos = ((qr_img.size[0] - logo.size[0]) // 2, (qr_img.size[1] - logo.size[1]) // 2)
+        qr_img.paste(logo_bg, pos)
+        qr_img.save(f"{name}-qr.png")
+        log("SUCCESS", "QRkod sparad.")
+        return True
+    except Exception as e:
+        log("FAILURE", f"Fel inträffade vid QRkod skapelse: {e}")
 
 # SAVEFILES
 if os.path.exists("guild_credentials.json"):
@@ -826,6 +853,34 @@ async def rec(ctx, *, a_type):
         5: f"Att du ens frågar! Såklart du ska beställa en {choice}."
     }
     await ctx.send(messages.get(msg))
+
+@bot.command()
+async def qr(ctx, link, department = None):
+    log("NOTICE", "Påbörjar QRkod skapelse...")
+    logos = {
+        "QP": ("QP_Logga.png", "#000000"),
+        "P": ("P-Logga_LOD1_white1.png", "#7C2629")
+    }
+    if department is None:
+        logo = logos["P"]
+    else:
+        logo = logos.get(department.upper())
+
+    if logo is None:
+        log("FAILURE", f"Nämnd vid namn {department} har inte en registrerad logga.")
+        return
+
+    try:
+        qr_code = await qr_gen(ctx.author.id, link, logo[0], logo[1])
+        if not qr_code:
+            log("FAILURE", "Fel inträffade vid QRkod skapelse, avbryter...")
+            return
+
+        filepath = f"{ctx.author.id}-qr.png"
+        await ctx.send(f"{ctx.author.mention} Okej, jag har nu skapat en QRkod åt dig.", file=discord.File(filepath))
+    except Exception as e:
+        log("FAILURE", f"Fel inträffade vid QRkod skapelse, {e}")
+
 # ERRORS
         
 # REMINDERS
