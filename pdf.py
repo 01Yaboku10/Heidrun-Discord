@@ -10,7 +10,7 @@ from reportlab.lib import colors
 pdfmetrics.registerFont(TTFont("Oswald", "oswald/Oswald-Regular.ttf"))
 pdfmetrics.registerFont(TTFont("Oswald-Bold", "oswald/Oswald-Bold.ttf"))
 
-def create_reimbursement(user, _approved: bool, place: str, name: str, number: str, mail: str, bank: str, cnumber:str, anumber: str, recipient: str, total: float, description: str, receipt: str):
+def create_reimbursement(user, _approved: bool, place: str, name: str, number: str, mail: str, bank: str, cnumber:str, anumber: str, recipient: str, total: float, description: str, receipt: list[str]):
     pdf = SimpleDocTemplate(f"reimbursement-{user.id}.pdf", pagesize=A4, topMargin=1*cm)
 
     styles = getSampleStyleSheet()
@@ -105,18 +105,20 @@ def create_reimbursement(user, _approved: bool, place: str, name: str, number: s
 
     content.append(signatures)
 
-    img = Image(receipt)
-    max_width = pdf.width
-    max_height = pdf.height
+    for im in receipt:
+        img = Image(im)
+        max_width = pdf.width
+        max_height = pdf.height
 
-    scale = min(
-        max_width / img.imageWidth,
-        max_height / img.imageHeight
-    )
+        scale = min(
+            max_width / img.imageWidth,
+            max_height / img.imageHeight
+        )
 
-    img.drawWidth = img.imageWidth * scale
-    img.drawHeight = img.imageHeight * scale
-    content.append(img)
+        img.drawWidth = img.imageWidth * scale
+        img.drawHeight = img.imageHeight * scale
+        content.append(img)
+
     content.append(Spacer(1, 0.3*cm))
     divider = Table(
         [[""]], colWidths=[pdf.width],
@@ -127,6 +129,6 @@ def create_reimbursement(user, _approved: bool, place: str, name: str, number: s
         ("ALIGN", (0,1), (-1,-1), "CENTER")
     ]))
     content.append(divider)
-    content.append(Paragraph(f"Denna ersättningsblankett skapades av Heidrun på begäran av användare {user.name} ({user.id})", body_style_small))
+    content.append(Paragraph(f"Denna ersättningsblankett skapades av Heidrun på begäran av individ {user.name} ({user.id})", body_style_small))
 
     pdf.build(content)

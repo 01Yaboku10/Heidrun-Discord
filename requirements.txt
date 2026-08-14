@@ -3,3 +3,9 @@ python-dotenv
 reportlab
 colorama
 reportLab
+PyMuPDF
+tzdata
+google-api-python-client
+google-auth
+Pillow
+qrcode

@@ -1,6 +1,9 @@
 import gspread
 from google.oauth2.service_account import Credentials
 from google.auth.exceptions import TransportError
+from googleapiclient.discovery import build
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import os
 import csv
 
@@ -76,10 +79,9 @@ def google_read(_creds) -> list:
     creds = Credentials.from_service_account_file(cred, scopes=scope)
     gc = gspread.authorize(creds)
     sheet = gc.open("Grafikförfråga - BM").sheet1
-    print("Heidrun || Spreadsheet hittad!")
     answers = []
     for row in sheet.get_all_values()[1:]:
-        answer = Answer(*row[1:])
+        answer = Answer(*row[1:7])
 
         if answer.discord == "Ja / Yes":
             answer.discord = True
@@ -103,3 +105,31 @@ def old_read(filename = "previous_projects.csv") -> list:
         return answers
     except FileNotFoundError:
         print(f"Heidrun || Error: {filename} kunde inte hittas...")
+
+def calendar_read(_creds, calendar_id):
+    scope = ["https://www.googleapis.com/auth/calendar.readonly"]
+    cred = _creds
+    creds = Credentials.from_service_account_file(cred, scopes=scope)
+    service = build("calendar", "v3", credentials=creds)
+
+    timezone = ZoneInfo("Europe/Stockholm")
+    now = datetime.now(timezone)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=7)
+    events = service.events().list(
+        calendarId=calendar_id,
+        timeMin=start.isoformat(),
+        timeMax=end.isoformat(),
+        singleEvents=True,
+        orderBy="startTime").execute()
+
+    return events.get("items", [])
+
+def get_calendars(_creds):
+    scope = ["https://www.googleapis.com/auth/calendar.readonly"]
+    cred = _creds
+    creds = Credentials.from_service_account_file(cred, scopes=scope)
+    service = build("calendar", "v3", credentials=creds)
+
+    result = service.calendarList().list().execute()
+    return result.get("items", [])
