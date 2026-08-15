@@ -461,11 +461,8 @@ async def thumbnail(ctx):
         return
 
     first_message = messages[0]
-
-    # Edit first message
-    await first_message.edit(
-        attachments=[image]
-    )
+    await first_message.edit(attachments=[image])
+    await ctx.send("Då har jag uppdaterat thumbnailen för tråden.")
 
 @bot.command()
 async def status(ctx, *, status):
@@ -524,7 +521,7 @@ async def tag(ctx, *, tag):
     thread = ctx.channel
     forum = thread.parent
     tags = forum.available_tags
-    if tag not in [tag.name.lower() for tag in tags]:
+    if tag.lower() not in [_tag.name.lower() for _tag in tags]:
         await ctx.send("Sådant tag har vi inte min pojk. Kika igen vilka som finns, jag orkar inte skapa några nya.")
         return
     new_tags = [_tag for _tag in thread.applied_tags]
@@ -544,6 +541,7 @@ async def tag(ctx, *, tag):
         new_tags.append(new_tag)
 
     await thread.edit(applied_tags=new_tags)
+    await ctx.send(f"Då lade jag till taggen {tag} till tråden.")
 
 @bot.command()
 @commands.has_role(high_perm)
@@ -703,7 +701,7 @@ async def reimbursement(ctx, place = "", recipient = "", total = 0, *, descripti
         return (message.author == ctx.author)
     log("NOTICE", f"Förbereder ersättningsblankett för {ctx.author.id}")
     if not place or not recipient or not total or not description:
-        await ctx.send('Nu gick det snett. För att använda kommandot skriv som följande, och kom igåg att affären måste vara **ett** ord, använd ett "-" i värsta fall\n```!reimbursement kostnadställe affär summa beskrivning```\nTill exempel:\n```!reimbursement Mottagning 7-Eleven 210 Köpte wraps till fadder.```')
+        await ctx.send('Nu gick det snett. För att använda kommandot skriv som följande, och kom igåg att affären måste vara **ett** ord, använd ett "-" i värsta fall\n```!reimbursement kostnadställe affär summa beskrivning```\nTill exempel:\n```!reimbursement Mottagning 7-Eleven 210 Köpte wraps till fadder.``` Du måste också tillsammans med detta meddelande ladda upp kvittor, antingen i bild form eller som pdf.')
         log("WARNING", "Kunde inte skapa ersättningsblankett pågrund av bristande information.")
         return
     if not ctx.message.attachments:
@@ -880,6 +878,14 @@ async def qr(ctx, link, department = None):
         await ctx.send(f"{ctx.author.mention} Okej, jag har nu skapat en QRkod åt dig.", file=discord.File(filepath))
     except Exception as e:
         log("FAILURE", f"Fel inträffade vid QRkod skapelse, {e}")
+        return
+
+    log("NOTICE", f"Raderar lokal QRkod för individ {ctx.author.id}.")
+    if os.path.exists(filepath):
+        os.remove(filepath)
+        log("SUCCESS", "Lyckad, fil har raderats.")
+    else:
+        log("FAILURE", f"Kunde inte hitta fil {filepath}")
 
 # ERRORS
         
@@ -1006,7 +1012,6 @@ async def check_forms():
                 skip = False
                 for old_answer in old_answers:
                     if answer == old_answer:
-                        log("WARNING", "Forum redan registrerad, skippar...")
                         skip = True
                         break
                 if skip:
