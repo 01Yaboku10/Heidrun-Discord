@@ -897,7 +897,7 @@ async def remind_event():
     log("NOTICE", "Läser events...")
     for guild in bot.guilds:
         for event in guild.scheduled_events:
-            log("NOTICE", f"Checkar event {event.name}")
+            #log("NOTICE", f"Checkar event {event.name}")
             if str(event.id) in reminders:
                 log("NOTICE", f"{event.name} har redan fått en påminnelse, skippar...")
                 continue
@@ -990,6 +990,28 @@ async def remind_event():
                     await channel.send(f"{role.mention} Glöm inte att det är {event.name}, ses om {minutes} minuter <3.")
                 else:
                     log("FAILURE", f"Kunde inte hitta notiskanal för 'styret' i guild {guild.id}")
+                    continue
+            elif event_type == "gasque":
+                channel = announcement_channels[guild.id]["announcement"].get("info-qp")
+                if channel is None:
+                    log("FAILURE", f"Kunde inte hitta notiskanal för 'info-qp' i guild {guild.id}")
+                    continue
+                channel = bot.get_channel(announcement_channels[guild.id]["announcement"]["info-qp"])
+                if channel:
+                    await channel.send(f"{role.mention} Fram med festhatten era slöa småbarn! Om {minutes} minuter är det ju förbanne mig {event.name}. Som vanligt gäller det Ovve alt utklädnad efter temat, ni får givetvis inte komma nakna för då blir det dålig stämning.")
+                else:
+                    log("FAILURE", f"Kunde inte hitta notiskanal för 'info-qp' i guild {guild.id}")
+                    continue
+            elif event_type == "sittning":
+                channel = announcement_channels[guild.id]["announcement"].get("info-sektionen")
+                if channel is None:
+                    log("FAILURE", f"Kunde inte hitta notiskanal för 'info-sektionen' i guild {guild.id}")
+                    continue
+                channel = bot.get_channel(announcement_channels[guild.id]["announcement"]["info-sektionen"])
+                if channel:
+                    await channel.send(f"{role.mention} Hoppas fracken och klänningarna är rena, för som ni bör veta är det ju {event.name} om {minutes} minuter. Om ni inte har anmält er får ni inte komma, men det visste ni ju redan. Se till att ni tar en liten fördrink så att halsen är smörjad för sång!")
+                else:
+                    log("FAILURE", f"Kunde inte hitta notiskanal för 'info-sektionen' i guild {guild.id}")
                     continue
             else:
                 continue
@@ -1087,7 +1109,8 @@ async def remind_calendar():
         return      # Skip if it's not monday or time is not around 7
     for guild in bot.guilds:
 
-        if guild.id == 698966709712978040:
+        # Skip public servers
+        if guild.id != 608243139676733441:
             continue
 
         role = discord.utils.get(guild.roles, name="Heidruns Följare")
@@ -1147,7 +1170,7 @@ async def remind_calendar():
 
         message = "## Dag | Event | Tid | Plats | Arrangör\n"
         for event, event_type, event_manager in sorted(events, key=lambda x: x[0].start_time):
-            message += f"{event.start_time.strftime("%A")} | {event.name} | {event.start_time.strftime("%H:%M")} | {DAYS.get(event.location.lower())} | {event_manager.upper()}\n"
+            message += f"{DAYS.get(event.start_time.strftime("%A"))} | {event.name} | {event.start_time.strftime("%H:%M")} | {event.location.lower()} | {event_manager.upper()}\n"
         try:
             if events:
                 await channel.send(f"# Händelser denna vecka\n God morgon alla. Solen är uppe, så det är dags att palla sig till skolan. Jag vet att ni alla är rätt så urusla att kika i kalendern, så jag har sumerat upp händelserna för denna vecka.\n{role.mention}")
