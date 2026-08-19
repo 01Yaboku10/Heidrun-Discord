@@ -83,7 +83,7 @@ def get_type(description):
             try:
                 _part = int(part)
                 _contents[1] = _part
-            except ValueFAILURE:
+            except ValueError:
                 _contents[i] = part
         event_type, reminder, event_manager = _contents
     else:
@@ -789,6 +789,7 @@ async def setup(ctx):
                 log("SUCCESS", f"Skapade roll {role} för guild {ctx.guild.id}")
             except Exception as e:
                 log("FAILURE", f"Saknar behörighet: {e}")
+                await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Fel uppstod vid skapande av roll {role}: {e}```")
     await ctx.send(f"```ansi\n{GREEN}Lyckat{RESET}. Alla relevanta roller har nu skapats.```")
     log("NOTICE", "Lyckat. Alla relevanta roller har nu skapats.")
 
@@ -821,11 +822,13 @@ async def setup(ctx):
 @bot.command()
 async def rec(ctx, *, a_type):
     alcohol = {
-        "beer": [["Norrlands Guld", "Norrlands Djup", "Guinness"], False],
-        "öl": [["Norrlands Guld", "Norrlands Djup", "Guinness"], False],
-        "cider": [["Briska Äpple", "Briska Mango", "Briska Svartvinbär"], False],
-        "shot": [["Bäska", "Jäger", "Mintu"], False],
-        "drink": [["Irish Snakebite", "Snakebite", "Diesel", "Lennart"], False]
+        "beer": [["Norrlands Guld", "Norrlands Djup", "Guinness", "Mariestad"], False],
+        "öl": [["Norrlands Guld", "Norrlands Djup", "Guinness", "Mariestad"], False],
+        "cider": [["Briska Äpple", "Briska Päron", "Briska Riesling & Persika", "Briska Hallon & Vinbär", "Smirnoff Ice", "Kubik Granatäpple", "Kubik Fläder", "Kubik Persika", "Kubik Grapefruit"], False],
+        "shot": [["Bäska", "Jäger", "Mintu", "Tequila", "Captain Morgan", "Fireball", "Bacardi", "Limoncello"], False],
+        "drink": [["Irish Snakebite", "Snakebite", "Diesel", "Lennart"], False],
+        "wine": [["Rött Vin", "Vitt Vin"], False],
+        "patch": [["Nattpasset - Jägarexamen", "Dagpasset - Jägarexamen", "Jägarexamen", "Diesel", "Irish Snakebite", "Beer Buddy", "Toxic Waste - Sur", "Toxic Waste - Söt", "Toxic Waste - Stark", "Toxic Waste - Salt", "Gyllene Bäsken"], False]
     }
 
     types = a_type.split()
@@ -999,6 +1002,8 @@ async def remind_event():
                 channel = bot.get_channel(announcement_channels[guild.id]["announcement"]["info-qp"])
                 if channel:
                     await channel.send(f"{role.mention} Fram med festhatten era slöa småbarn! Om {minutes} minuter är det ju förbanne mig {event.name}. Som vanligt gäller det Ovve alt utklädnad efter temat, ni får givetvis inte komma nakna för då blir det dålig stämning.")
+                    if hasattr(event, "url"):
+                        await channel.send(f"{event.url}")
                 else:
                     log("FAILURE", f"Kunde inte hitta notiskanal för 'info-qp' i guild {guild.id}")
                     continue
@@ -1010,6 +1015,8 @@ async def remind_event():
                 channel = bot.get_channel(announcement_channels[guild.id]["announcement"]["info-sektionen"])
                 if channel:
                     await channel.send(f"{role.mention} Hoppas fracken och klänningarna är rena, för som ni bör veta är det ju {event.name} om {minutes} minuter. Om ni inte har anmält er får ni inte komma, men det visste ni ju redan. Se till att ni tar en liten fördrink så att halsen är smörjad för sång!")
+                    if hasattr(event, "url"):
+                        await channel.send(f"{event.url}")
                 else:
                     log("FAILURE", f"Kunde inte hitta notiskanal för 'info-sektionen' i guild {guild.id}")
                     continue

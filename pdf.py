@@ -1,6 +1,6 @@
 from reportlab.lib.enums import TA_JUSTIFY, TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.pdfbase import pdfmetrics
@@ -105,10 +105,12 @@ def create_reimbursement(user, _approved: bool, place: str, name: str, number: s
 
     content.append(signatures)
 
-    for im in receipt:
+    content.append(PageBreak())
+
+    for i, im in enumerate(receipt):
         img = Image(im)
         max_width = pdf.width
-        max_height = pdf.height
+        max_height = pdf.height - 20
 
         scale = min(
             max_width / img.imageWidth,
@@ -118,6 +120,9 @@ def create_reimbursement(user, _approved: bool, place: str, name: str, number: s
         img.drawWidth = img.imageWidth * scale
         img.drawHeight = img.imageHeight * scale
         content.append(img)
+
+        if i < len(receipt) - 1:
+            content.append(PageBreak())
 
     content.append(Spacer(1, 0.3*cm))
     divider = Table(

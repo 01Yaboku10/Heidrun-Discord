@@ -76,20 +76,23 @@ def google_read(_creds) -> list:
     if cred is None:
         print("Heidrun || Error: Kan inte läsa från google spreadsheet...")
         return []
-    creds = Credentials.from_service_account_file(cred, scopes=scope)
-    gc = gspread.authorize(creds)
-    sheet = gc.open("Grafikförfråga - BM").sheet1
-    answers = []
-    for row in sheet.get_all_values()[1:]:
-        answer = Answer(*row[1:7])
+    try:
+        creds = Credentials.from_service_account_file(cred, scopes=scope)
+        gc = gspread.authorize(creds)
+        sheet = gc.open("Grafikförfråga - BM").sheet1
+        answers = []
+        for row in sheet.get_all_values()[1:]:
+            answer = Answer(*row[1:7])
 
-        if answer.discord == "Ja / Yes":
-            answer.discord = True
-        else:
-            answer.discord = False
+            if answer.discord == "Ja / Yes":
+                answer.discord = True
+            else:
+                answer.discord = False
 
-        answers.append(answer)
-    return answers
+            answers.append(answer)
+        return answers
+    except Exception as e:
+        print(f"Heidrun || Error: {e}")
 
 def old_read(filename = "previous_projects.csv") -> list:
     answers = []
