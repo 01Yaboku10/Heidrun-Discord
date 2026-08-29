@@ -15,6 +15,9 @@ import pymupdf
 from typing import Any
 import qrcode
 from PIL import Image
+import sumup
+import requests
+import asyncio
 
 init(autoreset=True)
 
@@ -58,6 +61,12 @@ class Event():
         self.location = location
         self.id = id
         self.description = description
+
+class Item():
+    def __init__(self, name, price, quantity) -> None:
+        self.name = name
+        self.price = price
+        self.quantity = quantity
 
 # LOGIC
 def get_type(description):
@@ -200,6 +209,7 @@ async def collect_info(user):
             response = await bot.wait_for("message", timeout=300, check=check)
             if response.content.lower() == "avbryt":
                 await user.send("Jag har inte all tid i världen... Skriv igen senare om du fortfarande är intereserad, sluta slösa min tid.")
+                log("SUCCESS", f"Avbröt registrering för individ {user.id}")
                 return
             answers[tag] = response.content
         except TimeoutError:
@@ -320,7 +330,7 @@ async def on_ready():
         user_ids[guild.id] = {}
         missions[guild.id] = {}
         if guild.id not in announcement_channels:
-            announcement_channels[guild.id] = {"announcement": {}, "calendar": {}}
+            announcement_channels[guild.id] = {"announcement": {}, "calendar": {}, "sumup": {}}
         for channel in guild.channels:
             channel_ids[guild.id][channel.name] = channel.id
         for member in guild.members:
@@ -670,6 +680,29 @@ async def register(ctx, r_type: str = "", tag: str = None, value = None):
                 announcement_channels[ctx.guild.id]["calendar"][tag] = value
             log("SUCCESS", f"Server {ctx.guild.id} har nu länkat google kalendern {announcement_channels[ctx.guild.id]["calendars"][tag]}")
             await ctx.send("Då har jag nu länkat eran google kalender. Om ni formaterar deras beskrivningar rätt så kommer de följa med i mina veckopåminnelser.")
+        elif r_type == "sumup":
+            perm = discord.utils.get(ctx.guild.roles, name=high_perm)
+            if perm not in ctx.author.roles:
+                await ctx.send("Vem tror du att du är? Du har förbanne mig inte tillåtelse att använda det kommandot.")
+                return
+            if ctx.guild is None:
+                await ctx.send("Detta kommando kan endast användas på en server.")
+                return
+            hassum = announcement_channels[ctx.guild.id]["sumup"].get(tag)
+            if hassum is None:
+                announcement_channels[ctx.guild.id]["sumup"][tag] = value
+            else:
+                approved = await y_or_n(ctx, f"En {tag} är redan registrerad. Vill du överskrida den?")
+                if approved is None:
+                    await ctx.send("Jag har inte all tid i världen... Skriv igen senare om du fortfarande är intereserad, sluta slösa min tid.")
+                    return
+                if not approved:
+                    await ctx.send("Nä, då skiter vi att registrera den då.")
+                    log("SUCCESS", f"Registreting avbruten för {r_type}")
+                    return
+                announcement_channels[ctx.guild.id]["sumup"][tag] = value
+            log("SUCCESSS", f"Server {ctx.guild.id} hade nu länkat SumUp {tag} till {value}")
+            await ctx.send(f"Då har jag nu länkat SumUp {tag}.")
         else:
             await ctx.send(f"Typen {r_type} finns inte till detta kommando... Kanske du skulle vetat om du läste dokumentationen.")
             log("FAILURE", f"Typ {r_type} finns inte i systemet.")
@@ -696,7 +729,7 @@ async def registration(ctx, tag):
             await ctx.send(f"# Registration {ctx.author.name}\n**Name:** {user["name"]}\n**Telefonnummer:** {user["number"]}\n**Mail:** {user["mail"]}\n**Bank:** {user["bank"]}\n**Clearing Nummer:** {user["cnumber"]}\n**Kontonummer:** {user["anumber"]}")
 
 @bot.command()
-async def reimbursement(ctx, place = "", recipient = "", total = 0, *, description = ""):
+async def reimbursement(ctx, place = "", recipient = "", total = "", *, description = ""):
     def check(message):
         return (message.author == ctx.author)
     log("NOTICE", f"Förbereder ersättningsblankett för {ctx.author.id}")
@@ -750,6 +783,12 @@ async def reimbursement(ctx, place = "", recipient = "", total = 0, *, descripti
                 os.remove(receipt_path)
             else:
                 receipt_paths.append(receipt_path)
+        decimals = total.split(",")
+        if len(decimals) > 1:
+            total = float(decimals[0]) + float(f"0.{decimals[1]}")
+        else:
+            total = float(total)
+
         pdf.create_reimbursement(ctx.author, True, place, data["name"], data["number"], data["mail"], data["bank"], data["cnumber"], data["anumber"], recipient, total, description, receipt_paths)
         filepath = Path(f"reimbursement-{ctx.author.id}.pdf")
         log("SUCCESS", f"Ersättningsblankett skapad för individ {ctx.author.id}")
@@ -818,6 +857,58 @@ async def setup(ctx):
         log("FAILURE", f"Jag hade inte tillåtelse att skicka DM till ägaren för {ctx.guild.id}")
 
     await ctx.send(f"```ansi\n{GREEN}Lyckat{RESET}. Setup för server {YELLOW}{ctx.guild.id}{RESET} avklarad. Använd !helpme för lista av kommandon.```")
+
+@bot.command()
+async def earnings(ctx, mode = None, days = None, limit = 0, start = None, end = None):
+    log("NOTICE", "Hämtar resultat från SumUp...")
+    api_key = announcement_channels[ctx.guild.id]["sumup"].get("api_key")
+    merchant_code = announcement_channels[ctx.guild.id]["sumup"].get("merchant_code")
+    if api_key is None:
+        await ctx.send("Det finns ingen API nyckel kopplad till denna server. Använd *!register sumup api_key* för att registrera en nyckel.")
+        return
+    if merchant_code is None:
+        await ctx.send("Det finns ingen Merchant Code kopplad till denna server. Använd *!register sumup merchant_code* för att registrera en ny kod.")
+        return
+    
+    try:
+        if days is not None:
+            try:
+                days = int(days)
+            except ValueError:
+                log("FAILURE", "ValueError för inmatning av data för !earnings")
+                return
+        if days:
+            transactions = sumup.get_transactions(api_key, merchant_code, days, limit, start)
+        else:
+            transactions = sumup.get_transactions(api_key, merchant_code, limit=limit, _start=start)
+    except requests.exceptions.Timeout:
+        log("FAILURE", "SumUp request timed out.")
+        await ctx.send(f"```ansi\n{CYAN}Meddelande{RESET}. SumUp tog för lång tid att svara. Avbryter...```")
+        return
+    except requests.exceptions.RequestException as e:
+        log("FAILURE", f"SumUp request misslyckades: {e}")
+        await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Ett fel uppstod inom SumUp. Kontrollera att din API Key och Merchant Code är korrekt.```")
+        return
+
+    hours = 24
+    if days is not None:
+        hours *= days
+    await ctx.send(f"```ansi\n{CYAN}Meddelande{RESET}. Inhämtar senaste {limit if limit != 0 else f'{len(transactions)}'} transaktionerna för {ctx.guild.name} under de senaste {hours}h{f' för filter "{mode}".' if mode is not None else '.'} Detta kan ta en stund...```")
+
+    try:
+        products = sumup.get_transaction_details(api_key, merchant_code, mode, days, limit, start, end)
+        total = 0
+        for product in products.values():
+            total += product[2] * product[1]
+        products = sorted(products.values(), key=lambda x: x[1], reverse=True)
+        message = f"# Resultat {hours}h för {ctx.guild.name}. {limit if limit != 0 else f'{len(transactions)}'} transaktioner{f' filtrerat efter "{mode}".' if mode is not None else '.'}\nTotalt: {total} SEK"
+        message += "\n## Produkter:"
+        for sale in products:
+            message += f"\n{sale[0].capitalize()}: x{sale[1]}, {sale[1]*sale[2]} SEK"
+        await ctx.send(message)
+        log("SUCCESS", f"Resultat för guild {ctx.guild.id} hämtad och skickad.")
+    except Exception as e:
+        log("FAILURE", f"Fel uppstod vid imhämtning av SumUp produkter: {e}")
 
 @bot.command()
 async def rec(ctx, *, a_type):
@@ -890,6 +981,157 @@ async def qr(ctx, link, department = None):
     else:
         log("FAILURE", f"Kunde inte hitta fil {filepath}")
 
+@bot.command()
+async def invoice(ctx):
+    bankinfo = announcement_channels[ctx.guild.id].get("bank")
+    questions = {
+        "due": "När ska fakturan vara betald? (YYYY-MM-DD)",
+        "c_ref_name": "Vem är din kunds referens?",
+        "c_ref_contact": "Vad är dess mail?",
+        "description": "Vad är fakturan för? (Beskrivning)"
+    }
+    answers = {
+        "address": "",
+        "due": "",
+        "c_ref_name": "",
+        "c_ref_contact": "",
+        "description": ""
+    }
+    await ctx.send("Jag kommer nu fråga dig lite frågor, jag kräver att du svarar genom att bara skriva i chatten.\nOm du vill avbryta vid något tillfälle svara med **AVBRYT**, eller vänta 5min.")
+    def check(message):
+        return (message.author == ctx.author)
+    for tag, question in questions.items():
+        await ctx.send(f"# Fråga\n{question}")
+        try:
+            response = await bot.wait_for("message", timeout=300, check=check)
+            if response.content.lower() == "avbryt":
+                await ctx.send("Jag har inte all tid i världen... Skriv igen senare om du fortfarande är intereserad, sluta slösa min tid.")
+                log("SUCCESS", f"Avbröt faktura för individ {ctx.author.id}")
+                return
+            answers[tag] = response.content
+        except TimeoutError:
+            await ctx.send("Jag har inte all tid i världen... Skriv igen senare om du fortfarande är intereserad, sluta slösa min tid.")
+            return
+
+    approved = await y_or_n(ctx, "Vill du lägga till en address till kunden?")
+    if approved:
+        await ctx.send("# Fråga\nVad är kundens address?")
+        try:
+            response = await bot.wait_for("message", timeout=300, check=check)
+            answers["address"] = response.content
+        except TimeoutError:
+            await ctx.send("Jag har inte all tid i världen... Skriv igen senare om du fortfarande är intereserad, sluta slösa min tid.")
+            return
+    else:
+        answers["address"] = None
+
+    items = {}
+    approved = await y_or_n(ctx, "Okej, låt oss fortsätta. Vill du lägga till transaktioner från SumUP till fakturan?")
+    if approved:
+        sumup_qna = {
+            "start": "Från vilken dag vill du ha transaktioner?",
+            "end": "Till vilken dag vill du ha transaktioner?",
+            "filter": "Redogör filter för transaktioner (eller skriv **-** för att samla in data filterfritt)"
+        }
+        sumup_a = {
+            "start": "",
+            "end": "",
+            "filter": None
+        }
+        for ans, question in sumup_qna.items():
+            await ctx.send(f"# Fråga\n{question}")
+            try:
+                answer = await bot.wait_for("message", timeout=300, check=check)
+                if ans == "filter" and answer.content.strip() == "-":
+                    break
+                sumup_a[ans] = answer.content
+            except TimeoutError:
+                await ctx.send("Jag har inte all tid i världen... Skriv igen senare om du fortfarande är intereserad, sluta slösa min tid.")
+                return
+
+        api_key = announcement_channels[ctx.guild.id]["sumup"].get("api_key")
+        merchant_code = announcement_channels[ctx.guild.id]["sumup"].get("merchant_code")
+        try:
+            transactions = await asyncio.to_thread(sumup.get_transactions, api_key, merchant_code, 0, 0, sumup_a["start"], sumup_a["end"])
+            await ctx.send(f"```ansi\n{CYAN}Meddelande{RESET}. Inhämtar senaste {len(transactions)} transaktionerna för {ctx.guild.name} under period {sumup_a['start']} - {sumup_a['end']}{f' för filter "{sumup_a["filter"]}".' if not sumup_a['filter'] else '.'} Detta kan ta en stund...```")
+            try:
+                products = await asyncio.to_thread(sumup.get_transaction_details, api_key, merchant_code, sumup_a["filter"], 0, 0, sumup_a["start"], sumup_a["end"])
+                for product in products.values():
+                    if product[0] in items:
+                        items[product[0]].quantity += int(product[1])
+                    else:
+                        items[product[0]] = Item(product[0], int(product[2]), int(product[1]))
+                await ctx.send(f"```ansi\n{GREEN}Lyckat{RESET}. Alla transaktioner inhämtade och registrerade.```")
+            except Exception as e:
+                log("FAILURE", f"Fel uppstod vid inhämting av SumUp produkter för 'invoice': {e}")
+        except Exception as e:
+            log("FAILURE", f"Fel uppstod vid inhämting av SumUp produkter för 'invoice': {e}")
+        
+    manual = True
+    if approved:
+        approved = await y_or_n(ctx, "Vill du lägga till fler varor manuellt?")
+        if not approved:
+            manual = False
+    if manual:
+        await ctx.send("Vänligen lägg till varor genom följande syntax: ```benämning, pris, antal```, skriv **klar** när du känner dig klar.")
+        while True:
+            try:
+                response = await bot.wait_for("message", timeout=300, check=check)
+                if response.content.lower().strip() == "klar":
+                    break
+
+                data = response.content.split(",")
+                if len(data) != 3:
+                    await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Fel vid inmatning av data. Försök igen och använd syntax: namn, pris, antal```")
+                    continue
+
+                if data[0] in items:
+                    items[data[0]].quantity += int(data[2])
+                else:
+                    items[data[0]] = Item(data[0], int(data[1]), int(data[2]))
+            except TimeoutError:
+                await ctx.send("Jag har inte all tid i världen... Skriv igen senare om du fortfarande är intereserad, sluta slösa min tid.")
+                return
+    customer = {
+        "contact": {
+            "name": answers["c_ref_name"],
+            "mail": answers["c_ref_contact"],
+            "address": answers["address"]
+        }
+    }
+
+    date = datetime.now(timezone.utc).strftime(f"%Y%m%d")
+    day, index = announcement_channels[ctx.guild.id]["bank"]["invoice_count"]
+    if day == date[7:]:
+        index = int(index) + 1
+        announcement_channels[ctx.guild.id]["bank"]["invoice_count"] = [date[6:], index]
+    else:
+        index = 1
+        announcement_channels[ctx.guild.id]["bank"]["invoice_count"] = [date[6:], 0]
+    invoice_nr = date + f"{index}"
+
+    item_list = sorted(items.values(), key=lambda item: item.price * item.quantity, reverse=True)
+
+    try:
+        log("NOTICE", f"Skapar faktura för individ {ctx.author.id}...")
+        pdf.create_invoice_p(ctx.guild, bankinfo, invoice_nr, item_list, answers["due"], customer, answers["description"])
+    except Exception as e:
+        log("FAILURE", f"Error vid skapelse av faktura: {e}")
+        return
+
+    filepath = Path(f"invoice-{ctx.guild.id}-{invoice_nr}.pdf")
+    try:
+        await ctx.send(f"{ctx.author.mention} Okej, jag har nu skapat en faktura åt dig. ", file=discord.File(filepath))
+        log("SUCCESS", "Faktura skapad och skickat.")
+    finally:
+        log("NOTICE", f"Raderar lokal Faktura för individ {ctx.author.id}.")
+        if os.path.exists(filepath):
+            os.remove(filepath)
+            log("SUCCESS", "Lyckad, fil har raderats.")
+        else:
+            log("FAILURE", f"Kunde inte hitta fil {filepath}")
+        save_registry()
+
 # ERRORS
         
 # REMINDERS
@@ -897,145 +1139,149 @@ async def qr(ctx, link, department = None):
 async def remind_event():
     now = datetime.now(timezone.utc)
     await remind_calendar()
-    log("NOTICE", "Läser events...")
+    #log("NOTICE", "Läser events...")
     for guild in bot.guilds:
         for event in guild.scheduled_events:
-            #log("NOTICE", f"Checkar event {event.name}")
-            if str(event.id) in reminders:
-                log("NOTICE", f"{event.name} har redan fått en påminnelse, skippar...")
-                continue
-            log("NOTICE", f"Förbereder påminnelse för {event.name}")
-            description = event.description.lower()
-            event_type, reminder, event_manager = get_type(description)
-            if event.start_time - timedelta(minutes=int(reminder)) >= now or not event_type or not reminder:
-                log("WARNING", f"Event {event.name} är inte aktuellt, skippar...")
-                continue
-            time_left = event.start_time - datetime.now(timezone.utc)
-            minutes = int(time_left.total_seconds() // 60)
-            version_first = random.randint(1, 5)
-            version_second = random.randint(1, 5)
-            role = discord.utils.get(guild.roles, name="Heidruns Följare")
-            if not role:
-                log("WARNING", "Ingen notisroll finns för Heidruns Följare, skippar...")
-                continue
-            if minutes < 0:
-                log("WARNING", f"Event {event.name} har redan börjat eller varit, skippar...")
-                continue
-            if event_type == "pub":
-                has_workers = description.split("[arbetare]:")
-                if len(has_workers) > 1:
-                    workers = has_workers[1].strip()
-                    log("NOTICE", f"{workers} registrerade för event {event.id}")
-                else:
-                    workers = ""
-                worker_notis = []
-                if workers:
-                    for worker in workers.split(","):
-                        user = bot.get_user(user_ids[guild.id][worker])
-                        if user:
-                            worker_notis.append(user)
+            try:
+                if str(event.id) in reminders:
+                    log("NOTICE", f"{event.name} har redan fått en påminnelse, skippar...")
+                    continue
+                #log("NOTICE", f"Förbereder påminnelse för {event.name}")
+                description = event.description.lower()
+                event_type, reminder, event_manager = get_type(description)
+                if event.start_time - timedelta(minutes=int(reminder)) >= now or not event_type or not reminder:
+                    #log("WARNING", f"Event {event.name} är inte aktuellt, skippar...")
+                    continue
+                time_left = event.start_time - datetime.now(timezone.utc)
+                minutes = int(time_left.total_seconds() // 60)
+                version_first = random.randint(1, 5)
+                version_second = random.randint(1, 5)
+                role = discord.utils.get(guild.roles, name="Heidruns Följare")
+                if not role:
+                    log("WARNING", "Ingen notisroll finns för Heidruns Följare, skippar...")
+                    continue
+                if minutes < 0:
+                    log("WARNING", f"Event {event.name} har redan börjat eller varit, skippar...")
+                    continue
+                if event_type == "pub":
+                    has_workers = description.split("[arbetare]:")
+                    if len(has_workers) > 1:
+                        workers = has_workers[1].strip()
+                        log("NOTICE", f"{workers} registrerade för event {event.id}")
+                    else:
+                        workers = ""
+                    worker_notis = []
+                    if workers:
+                        for worker in workers.split(","):
+                            user = bot.get_user(user_ids[guild.id][worker])
+                            if user:
+                                worker_notis.append(user)
 
-                channel = announcement_channels[guild.id]["announcement"].get("info-qp")
-                if channel is None:
-                    log("FAILURE", f"Kunde inte hitta notiskanal för 'qlubbmästeriet utlysande' i guild {guild.id}")
-                    continue
-                channel = bot.get_channel(announcement_channels[guild.id]["announcement"]["info-qp"])
-                messages_first = {
-                    1: f"# ---=PUB=---\n{role.mention} Har du sätt? Det är ju för sjutton **{event.name}** idag! Baren slår upp dörrarna om ynka **{minutes} minuter**, och här sitter ni som om ni hade all tid i världen... Dagens generation...\nVisste ni förresten att vi faktiskt har både kall öl och riktig bäsk? Jo minsann, sådant som folk förr i tiden kunde uppskatta, innan alla började springa omkring med sina märkliga drycker och trodde de var något.",
-                    2: f"# ---=PUB=---\n{role.mention} Har ni hört det här? Det är ju **{event.name}** idag! Och som vanligt verkar folk behöva bli påminda om sådant som faktiskt står i kalendern. Baren öppnar om **{minutes} minuter**, så det vore väl inte för mycket begärt att ni kunde masa er i tid för en gångs skull.\nVo har både kall öl och bäsk, minsann. Riktiga drycker, sådana som folk uppskattade innan allting skulle vara så märkvärdigt och modernt.",
-                    3: f"# ---=PUB=---\n{role.mention} Men snälla nån... har ni helt missat att det är **{event.name}** idag? Det är ju nästan imponerande hur dåligt folk kan hålla reda på enkla saker. Baren öppnar om **{minutes} minuter**, och jag antar att några av er fortfarande sitter hemma och funderar på vad ni ska göra ikväll. Jag kan tala om vad ni ska göra: ni ska komma till puben.\nDär finns både kall öl och bäsk, om någon fortfarande vet vad en riktig dryck är.",
-                    4: f"# ---=PUB=---\n{role.mention} Jag antar att jag får vara den som påminner er igen... Det är nämligen **{event.name}** idag. Ja, faktiskt. Baren öppnar om **{minutes} minuter**, så om ni tänkte komma får ni väl börja röra på er nu istället för att sitta där och fundera.\nOch ja, vi har både kall öl och bäsk. Jag vet, helt otroligt att någon fortfarande anstänger sig och ordnar trevliga saker.",
-                    5: f"# ---=PUB=---\n{role.mention} Kära nån, på min tid i Sn@quan behövde man minsann inte påminna folk om att det var **{event.name}**. Då visste man när det var dags att dyka och umgås som vanligt folk. Men tiderna förändras väl, antar jag. Därför kommer här en påminnelse: **DET ÄR PUB IDAG.**. Baren öppnar om **{minutes} minuter**. Det är inte direkt gott om tid, så ni får väl slita er från era soffor och annat trams. Vi serverar kall öl och bäsk, precis som sig bör."
-                }
-                messages_second = {
-                    1: f"Ni får väl masa er dit en stund åtminstone. Det skadar ingen att visa sig bland folk ibland, vet ni. Ni kan till och med hälsa på de stackars tappra själar som står och sliter bakom baren ikväll: {" ".join(user.mention for user in worker_notis)}.",
-                    2: f"Kom nu förbi en liten stund åtminstonde. Det är faktiskt trevligt att se era ansikten ibland, även om vissa av er verkar göra allt för att undvika folk. Bakom baren står kvällens tappra arbetare, som offrar sin dyrbara tid för att hålla ordning på eländet: {" ".join(user.mention for user in worker_notis)}.",
-                    3: f"Ni behöver inte stanna hela kvällen, men nog borde ni kunna visa lite livstecken och hälsa på de stackare som står bakom baren. Följande tappra själar har tagit på sig ansvaret denna gång: {" ".join(user.mention for user in worker_notis)}.",
-                    4: f"Ta nu och kom förbi en sväng. Ni kanske till och med råkar ha trevligt, även om det verkar vara en överraskning för vissa. I baren finner ni dessa tappra individer, som valt att spendera sin kväll med att servera en: {" ".join(user.mention for user in worker_notis)}.",
-                    5: f"Så kom förbi en stund. Hälsa på folk, drick något gott och visa att ni fortfarande vet hur man beter sig socialt. Bakom baren hittar ni dessa tappra knegare: {" ".join(user.mention for user in worker_notis)}."
-                }
-                if channel:
-                    await channel.send(messages_first[version_first])
-                    if worker_notis:
-                        await channel.send(messages_second[version_second])
+                    channel = announcement_channels[guild.id]["announcement"].get("info-qp")
+                    if channel is None:
+                        log("FAILURE", f"Kunde inte hitta notiskanal för 'qlubbmästeriet utlysande' i guild {guild.id}")
+                        continue
+                    channel = bot.get_channel(announcement_channels[guild.id]["announcement"]["info-qp"])
+                    messages_first = {
+                        1: f"# ---=PUB=---\n{role.mention} Har du sätt? Det är ju för sjutton **{event.name}** idag! Baren slår upp dörrarna om ynka **{minutes} minuter**, och här sitter ni som om ni hade all tid i världen... Dagens generation...\nVisste ni förresten att vi faktiskt har både kall öl och riktig bäsk? Jo minsann, sådant som folk förr i tiden kunde uppskatta, innan alla började springa omkring med sina märkliga drycker och trodde de var något.",
+                        2: f"# ---=PUB=---\n{role.mention} Har ni hört det här? Det är ju **{event.name}** idag! Och som vanligt verkar folk behöva bli påminda om sådant som faktiskt står i kalendern. Baren öppnar om **{minutes} minuter**, så det vore väl inte för mycket begärt att ni kunde masa er i tid för en gångs skull.\nVo har både kall öl och bäsk, minsann. Riktiga drycker, sådana som folk uppskattade innan allting skulle vara så märkvärdigt och modernt.",
+                        3: f"# ---=PUB=---\n{role.mention} Men snälla nån... har ni helt missat att det är **{event.name}** idag? Det är ju nästan imponerande hur dåligt folk kan hålla reda på enkla saker. Baren öppnar om **{minutes} minuter**, och jag antar att några av er fortfarande sitter hemma och funderar på vad ni ska göra ikväll. Jag kan tala om vad ni ska göra: ni ska komma till puben.\nDär finns både kall öl och bäsk, om någon fortfarande vet vad en riktig dryck är.",
+                        4: f"# ---=PUB=---\n{role.mention} Jag antar att jag får vara den som påminner er igen... Det är nämligen **{event.name}** idag. Ja, faktiskt. Baren öppnar om **{minutes} minuter**, så om ni tänkte komma får ni väl börja röra på er nu istället för att sitta där och fundera.\nOch ja, vi har både kall öl och bäsk. Jag vet, helt otroligt att någon fortfarande anstänger sig och ordnar trevliga saker.",
+                        5: f"# ---=PUB=---\n{role.mention} Kära nån, på min tid i Sn@quan behövde man minsann inte påminna folk om att det var **{event.name}**. Då visste man när det var dags att dyka och umgås som vanligt folk. Men tiderna förändras väl, antar jag. Därför kommer här en påminnelse: **DET ÄR PUB IDAG.**. Baren öppnar om **{minutes} minuter**. Det är inte direkt gott om tid, så ni får väl slita er från era soffor och annat trams. Vi serverar kall öl och bäsk, precis som sig bör."
+                    }
+                    messages_second = {
+                        1: f"Ni får väl masa er dit en stund åtminstone. Det skadar ingen att visa sig bland folk ibland, vet ni. Ni kan till och med hälsa på de stackars tappra själar som står och sliter bakom baren ikväll: {" ".join(user.mention for user in worker_notis)}.",
+                        2: f"Kom nu förbi en liten stund åtminstonde. Det är faktiskt trevligt att se era ansikten ibland, även om vissa av er verkar göra allt för att undvika folk. Bakom baren står kvällens tappra arbetare, som offrar sin dyrbara tid för att hålla ordning på eländet: {" ".join(user.mention for user in worker_notis)}.",
+                        3: f"Ni behöver inte stanna hela kvällen, men nog borde ni kunna visa lite livstecken och hälsa på de stackare som står bakom baren. Följande tappra själar har tagit på sig ansvaret denna gång: {" ".join(user.mention for user in worker_notis)}.",
+                        4: f"Ta nu och kom förbi en sväng. Ni kanske till och med råkar ha trevligt, även om det verkar vara en överraskning för vissa. I baren finner ni dessa tappra individer, som valt att spendera sin kväll med att servera en: {" ".join(user.mention for user in worker_notis)}.",
+                        5: f"Så kom förbi en stund. Hälsa på folk, drick något gott och visa att ni fortfarande vet hur man beter sig socialt. Bakom baren hittar ni dessa tappra knegare: {" ".join(user.mention for user in worker_notis)}."
+                    }
+                    if channel:
+                        await channel.send(messages_first[version_first])
+                        if worker_notis:
+                            await channel.send(messages_second[version_second])
+                    else:
+                        log("FAILURE", f"Kunde inte hitta notiskanal för 'qlubbmästeriet utlysande' i guild {guild.id}")
+                        continue
+                elif event_type == "sm":
+                    channel = announcement_channels[guild.id]["announcement"].get("info-sektionen")
+                    if channel is None:
+                        log("FAILURE", f"Kunde inte hitta notiskanal för 'utlysande' i guild {guild.id}")
+                        continue
+                    channel = bot.get_channel(announcement_channels[guild.id]["announcement"].get("info-sektion"))
+                    if channel:
+                        await channel.send(f"# ---=SM=---\n{role.mention} Har du nu lyckats glömma bort att det är möte idag också? Jösses, man får tydligen hålla reda på allting själv nuförtiden. Mötet börjar om ynka {minutes} minuter, så det vore väl på tiden att du pallrar dig dit och gör din röst hörd.\nVem vet, kanske finns det till och med lite käk att få om du behagar dyka upp. Sådant händer minsann inte varje dag, men ibland försöker folk faktiskt göra något trevligt för en gångs skull.")
+                        await channel.send(f"Mötet håller hus i {event.location}, ifall du skulle ha glömt det också. Och om du inte dyker upp... ja, då får jag väl anteckna att du för all framtid är bannlyst från att kalla dig min vän.")
+                    else:
+                        log("FAILURE", f"Kunde inte hitta notiskanal för 'utlysande' i guild {guild.id}")
+                        continue
+                elif event_type == "qmöte":
+                    channel = announcement_channels[guild.id]["announcement"].get("info-qp-intern")
+                    if channel is None:
+                        log("FAILURE", f"Kunde inte hitta notiskanal för 'qlubbmästeriet intern' i guild {guild.id}")
+                        continue
+                    channel = bot.get_channel(announcement_channels[guild.id]["announcement"].get("info-qp-intern"))
+                    if channel:
+                        await channel.send(f"{role.mention} Glöm inte att det är {event.name}, ses om {minutes} minuter <3.")
+                    else:
+                        log("FAILURE", f"Kunde inte hitta notiskanal för 'qlubbmästeriet intern' i guild {guild.id}")
+                elif event_type == "smöte":
+                    channel = announcement_channels[guild.id]["announcement"].get("info-styret")
+                    if channel is None:
+                        log("FAILURE", f"Kunde inte hitta notiskanal för 'styret' i guild {guild.id}")
+                        continue
+                    channel = bot.get_channel(announcement_channels[guild.id]["announcement"].get("info-styret"))
+                    if channel:
+                        await channel.send(f"{role.mention} Glöm inte att det är {event.name}, ses om {minutes} minuter <3.")
+                    else:
+                        log("FAILURE", f"Kunde inte hitta notiskanal för 'styret' i guild {guild.id}")
+                        continue
+                elif event_type == "gasque":
+                    channel = announcement_channels[guild.id]["announcement"].get("info-qp")
+                    if channel is None:
+                        log("FAILURE", f"Kunde inte hitta notiskanal för 'info-qp' i guild {guild.id}")
+                        continue
+                    channel = bot.get_channel(announcement_channels[guild.id]["announcement"]["info-qp"])
+                    if channel:
+                        await channel.send(f"{role.mention} Fram med festhatten era slöa småbarn! Om {minutes} minuter är det ju förbanne mig {event.name}. Som vanligt gäller det Ovve alt utklädnad efter temat, ni får givetvis inte komma nakna för då blir det dålig stämning.")
+                        if hasattr(event, "url"):
+                            await channel.send(f"{event.url}")
+                    else:
+                        log("FAILURE", f"Kunde inte hitta notiskanal för 'info-qp' i guild {guild.id}")
+                        continue
+                elif event_type == "sittning":
+                    channel = announcement_channels[guild.id]["announcement"].get("info-sektionen")
+                    if channel is None:
+                        log("FAILURE", f"Kunde inte hitta notiskanal för 'info-sektionen' i guild {guild.id}")
+                        continue
+                    channel = bot.get_channel(announcement_channels[guild.id]["announcement"]["info-sektionen"])
+                    if channel:
+                        await channel.send(f"{role.mention} Hoppas fracken och klänningarna är rena, för som ni bör veta är det ju {event.name} om {minutes} minuter. Om ni inte har anmält er får ni inte komma, men det visste ni ju redan. Se till att ni tar en liten fördrink så att halsen är smörjad för sång!")
+                        if hasattr(event, "url"):
+                            await channel.send(f"{event.url}")
+                    else:
+                        log("FAILURE", f"Kunde inte hitta notiskanal för 'info-sektionen' i guild {guild.id}")
+                        continue
                 else:
-                    log("FAILURE", f"Kunde inte hitta notiskanal för 'qlubbmästeriet utlysande' i guild {guild.id}")
                     continue
-            elif event_type == "sm":
-                channel = announcement_channels[guild.id]["announcement"].get("info-sektionen")
-                if channel is None:
-                    log("FAILURE", f"Kunde inte hitta notiskanal för 'utlysande' i guild {guild.id}")
-                    continue
-                channel = bot.get_channel(announcement_channels[guild.id]["announcement"].get("info-sektion"))
-                if channel:
-                    await channel.send(f"# ---=SM=---\n{role.mention} Har du nu lyckats glömma bort att det är möte idag också? Jösses, man får tydligen hålla reda på allting själv nuförtiden. Mötet börjar om ynka {minutes} minuter, så det vore väl på tiden att du pallrar dig dit och gör din röst hörd.\nVem vet, kanske finns det till och med lite käk att få om du behagar dyka upp. Sådant händer minsann inte varje dag, men ibland försöker folk faktiskt göra något trevligt för en gångs skull.")
-                    await channel.send(f"Mötet håller hus i {event.location}, ifall du skulle ha glömt det också. Och om du inte dyker upp... ja, då får jag väl anteckna att du för all framtid är bannlyst från att kalla dig min vän.")
-                else:
-                    log("FAILURE", f"Kunde inte hitta notiskanal för 'utlysande' i guild {guild.id}")
-                    continue
-            elif event_type == "qmöte":
-                channel = announcement_channels[guild.id]["announcement"].get("info-qp-intern")
-                if channel is None:
-                    log("FAILURE", f"Kunde inte hitta notiskanal för 'qlubbmästeriet intern' i guild {guild.id}")
-                    continue
-                channel = bot.get_channel(announcement_channels[guild.id]["announcement"].get("info-qp-intern"))
-                if channel:
-                    await channel.send(f"{role.mention} Glöm inte att det är {event.name}, ses om {minutes} minuter <3.")
-                else:
-                    log("FAILURE", f"Kunde inte hitta notiskanal för 'qlubbmästeriet intern' i guild {guild.id}")
-            elif event_type == "smöte":
-                channel = announcement_channels[guild.id]["announcement"].get("info-styret")
-                if channel is None:
-                    log("FAILURE", f"Kunde inte hitta notiskanal för 'styret' i guild {guild.id}")
-                    continue
-                channel = bot.get_channel(announcement_channels[guild.id]["announcement"].get("info-styret"))
-                if channel:
-                    await channel.send(f"{role.mention} Glöm inte att det är {event.name}, ses om {minutes} minuter <3.")
-                else:
-                    log("FAILURE", f"Kunde inte hitta notiskanal för 'styret' i guild {guild.id}")
-                    continue
-            elif event_type == "gasque":
-                channel = announcement_channels[guild.id]["announcement"].get("info-qp")
-                if channel is None:
-                    log("FAILURE", f"Kunde inte hitta notiskanal för 'info-qp' i guild {guild.id}")
-                    continue
-                channel = bot.get_channel(announcement_channels[guild.id]["announcement"]["info-qp"])
-                if channel:
-                    await channel.send(f"{role.mention} Fram med festhatten era slöa småbarn! Om {minutes} minuter är det ju förbanne mig {event.name}. Som vanligt gäller det Ovve alt utklädnad efter temat, ni får givetvis inte komma nakna för då blir det dålig stämning.")
-                    if hasattr(event, "url"):
-                        await channel.send(f"{event.url}")
-                else:
-                    log("FAILURE", f"Kunde inte hitta notiskanal för 'info-qp' i guild {guild.id}")
-                    continue
-            elif event_type == "sittning":
-                channel = announcement_channels[guild.id]["announcement"].get("info-sektionen")
-                if channel is None:
-                    log("FAILURE", f"Kunde inte hitta notiskanal för 'info-sektionen' i guild {guild.id}")
-                    continue
-                channel = bot.get_channel(announcement_channels[guild.id]["announcement"]["info-sektionen"])
-                if channel:
-                    await channel.send(f"{role.mention} Hoppas fracken och klänningarna är rena, för som ni bör veta är det ju {event.name} om {minutes} minuter. Om ni inte har anmält er får ni inte komma, men det visste ni ju redan. Se till att ni tar en liten fördrink så att halsen är smörjad för sång!")
-                    if hasattr(event, "url"):
-                        await channel.send(f"{event.url}")
-                else:
-                    log("FAILURE", f"Kunde inte hitta notiskanal för 'info-sektionen' i guild {guild.id}")
-                    continue
-            else:
-                continue
-            reminders[str(event.id)] = True
-            log("SUCCESS", f"Skickade påminnelse för {event.name}")
+                reminders[str(event.id)] = True
+                log("SUCCESS", f"Skickade påminnelse för {event.name}")
+            except Exception as e:
+                log("FAILURE", f"Error uppstod vid påminnelse för event {event.name}: {e}")
     save_reminders()
 
-@tasks.loop(minutes=1)
+@tasks.loop(minutes=2)
 async def check_forms():
     for guild in bot.guilds:
-        log("NOTICE", f"Checkar google sheet for guild {guild.id}")
+        #log("NOTICE", f"Checkar google sheet for guild {guild.id}")
         auth = google_auth.get(guild.id)
         if auth is None:
-            log("WARNING", f"Ingen google länk för guild {guild.id}, skippar...")
+            #log("WARNING", f"Ingen google länk för guild {guild.id}, skippar...")
             continue
         old_answers = google_sheet.old_read()
         answers = google_sheet.google_read(auth)
+        if answers is None:
+            continue
         for answer in answers:
             try:
                 skip = False
@@ -1111,7 +1357,7 @@ async def check_forms():
 async def remind_calendar():
     now = datetime.now(timezone.utc)
     today = datetime.today().weekday()
-    log("NOTICE", "Läser kalendrar...")
+    #log("NOTICE", "Läser kalendrar...")
     if today != 0 or not time(7, 0) <= now.time() <= time(7, 2):
         return      # Skip if it's not monday or time is not around 7
     for guild in bot.guilds:
