@@ -20,11 +20,11 @@ def get_transactions(api_key, merchant_code, history=0, limit=0, _start = None, 
         end = datetime.fromisoformat(date_string)
     else:
         end = datetime.now(ZoneInfo("Europe/Stockholm"))
-    if history and _start is not None:
+    if history and _start is None:
         today = datetime.now() - timedelta(days=history)
     start = datetime.combine(today, time.min, tzinfo=ZoneInfo("Europe/Stockholm"))
     if limit == 0:
-        limit = 5000
+        limit = 100000
     params = {
         "oldest_time": start.isoformat(),
         "newest_time": end.isoformat(),
@@ -61,20 +61,58 @@ def get_transaction_details(api_key, merchant_code, mode=None, history=0, limit=
     transactions = get_transactions(api_key, merchant_code, history, limit, start, end)
     with ThreadPoolExecutor(max_workers=10) as executor:
         results = executor.map(get_transaction, repeat(api_key), repeat(merchant_code), (transaction["transaction_id"] for transaction in transactions))
+        # leaderboard = {
+        #   "guild_id": {
+        #       "customer_id": {
+        #           "purchases": {
+        #               "product": {
+        #                   price: amount
+        #                },
+        #           },
+        #           "last_updated": "datetime",
+        #           "digits": "0000",
+        #           "user_id": "12345678"
+        #       }
+        #   }
+        # }
+        customer_ids = {}
         for transaction, details in tqdm(zip(transactions, results), total=len(transactions), desc=f"Heidrun || Bearbetar SumUP transaktioner för {merchant_code}"):
             if transaction.get("status") != "SUCCESSFUL":
                 continue
+
+            card = details.get("card")
+            digits = card.get("last_4_digits")
+            ref = card.get("payment_account_reference")
+            if ref not in customer_ids:
+                customer_ids[ref] = {"purchases": {}, "last_updated": details.get("timestamp"), "digits": digits, "user_id": ""}
+            else:
+                pass
+                # Update date
+
             for product in details.get("products", []):
                 if mode is not None:
-                    filtered = product["name"].split("-")
-                    if len(filtered) <= 1:
-                        continue
+                    if mode.strip().lower() != "none":
+                        filtered = product["name"].split("-")
+                        #if len(filtered) <= 1:
+                        #    continue
 
-                    if mode.strip().lower() not in filtered[0].strip().lower():
-                        continue
+                        if mode.strip().lower()[0] == "!":
+                            if mode.strip().lower()[1:] in filtered[0].strip().lower():
+                                continue
+                        else:
+                            if mode.strip().lower() not in filtered[0].strip().lower():
+                                continue
 
                 if product["name"] in products:
                     products[product["name"]][1] += int(product["quantity"])
                 else:
                     products[product["name"]] = [product["name"], int(product["quantity"]), float(product["price"])]
-    return products
+
+                if product["name"] in customer_ids[ref]["purchases"]:
+                    if product["price"] in customer_ids[ref]["purchases"][product["name"]]:
+                        customer_ids[ref]["purchases"][product["name"]][product["price"]] += int(product["quantity"])
+                    else:
+                        customer_ids[ref]["purchases"][product["name"]][product["price"]] = int(product["quantity"])
+                else:
+                    customer_ids[ref]["purchases"][product["name"]] = {product["price"]: product["quantity"]}
+    return products, customer_ids

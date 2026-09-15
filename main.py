@@ -4,6 +4,7 @@ import logging
 from dotenv import load_dotenv
 import os
 from datetime import datetime, timezone, timedelta, time
+from zoneinfo import ZoneInfo
 import random
 import google_sheet
 import csv
@@ -34,6 +35,8 @@ user_ids = {}       # guild_id: {username: id}
 reminders = {}
 weekly_reminders = {}
 missions = {}       # guild_id: {public: private}
+calendar_registrations = {}     # {message_id: {data}}
+leaderboard = {}
 
 DAYS = {
     "monday": "Måndag",
@@ -69,6 +72,28 @@ class Item():
         self.quantity = quantity
 
 # LOGIC
+async def update_calendar(registration):
+    log("NOTICE", "Påbörjar uppdatering av kalender")
+    approved = registration["approved"]
+    names = []
+    guild = bot.get_guild(registration["guild_id"])
+    for user_id in approved:
+        user = guild.get_member(user_id)
+        if user is None:
+            try:
+                user = await bot.fetch_user(user_id)
+            except discord.NotFound:
+                continue
+        names.append(user.nick or user.name)
+
+    description = "Följande personer har anmält att de kommer:\n"
+    if names:
+        description += "\n".join(f"- {name}" for name in names)
+    else:
+        description += "Ingen ännu."
+
+    await asyncio.to_thread(google_sheet.update_event, google_auth[registration["guild_id"]], registration["calendar_id"], registration["event_id"], description)
+
 def get_type(description):
     event_type = ""
     reminder = 0
@@ -87,13 +112,13 @@ def get_type(description):
         reminder = 60
         event_manager = ""
     elif len(contents) == 2:
-        _contents = [None, None, None]
+        _contents = ["", "", ""]
         for i, part in enumerate(contents):
             try:
                 _part = int(part)
                 _contents[1] = _part
             except ValueError:
-                _contents[i] = part
+                _contents[i] = part.strip()
         event_type, reminder, event_manager = _contents
     else:
         event_type, reminder, event_manager = contents
@@ -142,6 +167,10 @@ def save_reminders():
 
     with open("weekly_reminders.json", "w", encoding="utf-8") as f:
         json.dump(weekly_reminders, f, indent=4, ensure_ascii=False)
+
+def save_calendars():
+    with open("calendars.json", "w", encoding="utf-8") as f:
+        json.dump(calendar_registrations, f, indent=4, ensure_ascii=False)
 
 def log(category: str, msg: str) -> None:
     category = category.upper()
@@ -270,6 +299,9 @@ async def qr_gen(name, link, img, color):
     except Exception as e:
         log("FAILURE", f"Fel inträffade vid QRkod skapelse: {e}")
 
+def update_leaderboard(customer_ids):
+    for customer, details in customer_ids.items():
+        pass
 # SAVEFILES
 if os.path.exists("guild_credentials.json"):
     log("NOTICE", "Läser in Google Service Account Credentials för registrerade guilder...")
@@ -313,6 +345,15 @@ else:
     weekly_reminders = {}      # event: reminded (bool)
     log("WARNING", "Inga veckopåminnelser kunde hittas.")
 
+if os.path.exists("calendars.json"):
+    log("NOTICE", "Läser in kalendrar...")
+    with open("calendars.json", "r", encoding="utf-8") as s:
+        calendar_registrations = json.load(s)
+    log("SUCCESS", "Bekräftat. Inläsning av kalendrar lyckad.")
+else:
+    calendar_registrations = {}      # event: reminded (bool)
+    log("WARNING", "Inga kalendrar kunde hittas.")
+
 # INTENTS
 intents = discord.Intents.default()
 intents.message_content = True
@@ -329,8 +370,14 @@ async def on_ready():
         channel_ids[guild.id] = {}
         user_ids[guild.id] = {}
         missions[guild.id] = {}
+        leaderboard[guild.id] = {"pub": None}
         if guild.id not in announcement_channels:
-            announcement_channels[guild.id] = {"announcement": {}, "calendar": {}, "sumup": {}}
+            announcement_channels[guild.id] = {
+                "announcement": {}, 
+                "calendar": {}, 
+                "sumup": {}, 
+                "bank": {}
+            }
         for channel in guild.channels:
             channel_ids[guild.id][channel.name] = channel.id
         for member in guild.members:
@@ -340,6 +387,7 @@ async def on_ready():
         remind_event.start()
     if not check_forms.is_running():
         check_forms.start()
+    save_registry()
     log("SUCCESS", "Redo att fördela bäsk <3")
 
 @bot.event
@@ -420,22 +468,24 @@ async def thread(ctx, _channel, mission, *, _args):
         await ctx.send(f"Håll i hatten pojk, alla vet ju att {channel.name} inte är ett Forum... Testa en annan kanal innan jag blir galen av din idiokrati, det är smittsamt du vet.")
         return
 
+    tag = []
     if mission.lower() == "y":
         name = f"Uppdrag - {name}"
+        tag.append(discord.utils.get(channel.available_tags, name="Uppdrag"))
 
-    tag = discord.utils.get(channel.available_tags, name="EJ PÅBÖRJAD")
+    tag.append(discord.utils.get(channel.available_tags, name="EJ PÅBÖRJAD"))
 
     if description:
         await channel.create_thread(
             name=name,
             content=f"Här är din nya tråd {ctx.author.mention}. {description}",
-            applied_tags=[tag]
+            applied_tags=tag
         )
     else:
         await channel.create_thread(
             name=name,
             content=f"Här är din nya tråd {ctx.author.mention}. Glöm inte att lägga till lämplig TAG med hjälp av !tag. Skicka en bild och använda !thumbnail för att sätta en cover bild.",
-            applied_tags=[tag]
+            applied_tags=tag
         )
 
 @bot.command()
@@ -618,6 +668,7 @@ async def register(ctx, r_type: str = "", tag: str = None, value = None):
     log("NOTICE", f"Påbörjar registrering av {r_type}")
     if not r_type:
         await ctx.send("För att använda detta kommando skriv antingen följande för att registrera dina uppgifter:```!register info```\nEller skriv följande för att registrera en kanal: ```!register type tag value```. Se dokumentationen för giltiga typer.")
+        return
     if tag is not None:
         tag = tag.lower()
         channels = announcement_channels[ctx.guild.id]
@@ -647,6 +698,7 @@ async def register(ctx, r_type: str = "", tag: str = None, value = None):
             await ctx.send(f"Bekräftat. Notiskanal {tag} registrerad till kanal {value.id}.")
         elif r_type == "info":
             if ctx.guild is not None:
+                await ctx.send("Jag skickade ett DM, kolla där :)")
                 await ctx.author.send("Du tänker inte skicka dina privata uppgifter till allmänheten va?\nSkriv istället *!register info* här så håller vi det mellan oss två.")
                 return
             await collect_info(ctx.author)
@@ -678,7 +730,7 @@ async def register(ctx, r_type: str = "", tag: str = None, value = None):
                     log("SUCCESS", f"Registreting avbruten för {r_type}")
                     return
                 announcement_channels[ctx.guild.id]["calendar"][tag] = value
-            log("SUCCESS", f"Server {ctx.guild.id} har nu länkat google kalendern {announcement_channels[ctx.guild.id]["calendars"][tag]}")
+            log("SUCCESS", f"Server {ctx.guild.id} har nu länkat google kalendern {announcement_channels[ctx.guild.id]["calendar"][tag]}")
             await ctx.send("Då har jag nu länkat eran google kalender. Om ni formaterar deras beskrivningar rätt så kommer de följa med i mina veckopåminnelser.")
         elif r_type == "sumup":
             perm = discord.utils.get(ctx.guild.roles, name=high_perm)
@@ -701,8 +753,75 @@ async def register(ctx, r_type: str = "", tag: str = None, value = None):
                     log("SUCCESS", f"Registreting avbruten för {r_type}")
                     return
                 announcement_channels[ctx.guild.id]["sumup"][tag] = value
-            log("SUCCESSS", f"Server {ctx.guild.id} hade nu länkat SumUp {tag} till {value}")
-            await ctx.send(f"Då har jag nu länkat SumUp {tag}.")
+            log("SUCCESS", f"Server {ctx.guild.id} har nu länkat SumUp {tag} till {value}")
+            await ctx.send(f"```ansi\n{GREEN}Lyckat{RESET}. SumUp {tag} länkad.```")
+            if tag == "api_key":
+                await ctx.message.delete()
+        elif r_type == "bank":
+            perm = discord.utils.get(ctx.guild.roles, name=high_perm)
+            if perm not in ctx.author.roles:
+                await ctx.send("Vem tror du att du är? Du har förbanne mig inte tillåtelse att använda det kommandot.")
+                return
+            if ctx.guild is None:
+                await ctx.send("Detta kommando kan endast användas på en server.")
+                return
+            questions = {
+                "recipient": "Vad heter föreningen?",
+                "address": "Vad är addressen till föreningen?",
+                "post": "Vad är post nummret och land till föreningen?",
+                "org_number": "Vad är föreningens organisationsnummer?",
+                "c_name": "Vem är eran referens / ekonomi ansvarig?",
+                "c_position": "Vad är hens position inom föreningen?",
+                "c_mail": "Vad är hens mail?",
+                "bg": "Vad är föreningens Bank-giro?"
+            }
+            answers = {
+                "bg": "",
+                "bnumber": "",
+                "cnumber": "",
+                "recipient": "",
+                "bs": "",
+                "swish": "",
+                "name": "",
+                "address": "",
+                "post": "",
+                "org_number": "",
+                "contact": {
+                    "mail": "",
+                    "name": "",
+                    "position": ""
+                },
+                "invoice_count": ["00", 1]
+            }
+            for _tag, question in questions.items():
+                await ctx.send(question)
+                try:
+                    response = await bot.wait_for("message", timeout=300, check=check)
+                    if response.content.lower() == "avbryt":
+                        await ctx.send("Jag har inte all tid i världen... Skriv igen senare om du fortfarande är intereserad, sluta slösa min tid.")
+                        log("SUCCESS", f"Avbröt bank registrering för guild {ctx.guild.id}")
+                        return
+                    answers[_tag] = response.content
+                except TimeoutError:
+                    await ctx.send("Jag har inte all tid i världen... Skriv igen senare om du fortfarande är intereserad, sluta slösa min tid.")
+                    return
+
+            answers["contact"]["mail"] = answers["c_mail"]
+            answers["contact"]["name"] = answers["c_name"]
+            answers["contact"]["position"] = answers["c_position"]
+            del answers["c_mail"]
+            del answers["c_name"]
+            del answers["c_position"]
+
+            approved = await y_or_n(ctx, f"# Kontroll\nVänligen kontrollera att följande uppgifter stämmer:\nFörening: {answers["name"]}\nAddress: {answers["address"]}\nPost: {answers["post"]}\nOrg-Nr: {answers['org_number']}\n\nReferens: {answers["contact"]["name"]}\nMail: {answers["contact"]["mail"]}\nPosition: {answers["contact"]["position"]}")
+            if not approved:
+                await ctx.send("Jaha, då får du gärna kika över bank information och sluta slösa min tid. Är du så urusel att du inte kan din egna förenings information? Du får skriva *!register bank* igen om du vill testa en gång till.")
+                return
+            announcement_channels[ctx.guild.id]["bank"] = answers
+            log("SUCCESS", f"Registrerade bank information för guild {ctx.guild.id}")
+            await ctx.send(f"```ansi\n{GREEN}Lyckat{RESET}. Bank information registrerad.```")
+            await ctx.send("Dåså, då har jag registrerat bank informationen. Du kan nu använda *!invoice* för att automatiskt eller manuellt skapa fakturor. Om du någonsin vill ta bort din information så kan du skriva *!unregister bank*")
+            save_registry()
         else:
             await ctx.send(f"Typen {r_type} finns inte till detta kommando... Kanske du skulle vetat om du läste dokumentationen.")
             log("FAILURE", f"Typ {r_type} finns inte i systemet.")
@@ -710,6 +829,89 @@ async def register(ctx, r_type: str = "", tag: str = None, value = None):
         save_registry()
     except Exception as e:
         log("FAILURE", f"Fel uppstod: {e}")
+
+async def unregister(ctx, r_type: str = "", tag: str = None):
+    def check(message):
+        return (message.author == ctx.author)
+    r_type = r_type.lower()
+    log("NOTICE", f"Påbörjar avregistrering av {r_type}")
+    if not r_type:
+        await ctx.send("För att använda detta kommando skriv antingen följande för att avregistrera dina uppgifter:```!unregister info```\nEller skriv följande för att avregistrera en kanal: ```!unregister type tag```. Se dokumentationen för giltiga typer.")
+        return
+    if tag is not None:
+        tag = tag.lower()
+        channels = announcement_channels[ctx.guild.id]
+    try:
+        if r_type == "announcement" and tag is not None:
+            perm = discord.utils.get(ctx.guild.roles, name=high_perm)
+            if perm not in ctx.author.roles:
+                await ctx.send("Vem tror du att du är? Du har förbanne mig inte tillåtelse att använda det kommandot.")
+                return
+            channel = channels.get(tag)
+            if channel is None:
+                await ctx.send("Du har inte registrerat denna kanal...")
+                return
+            del channels[tag]
+            log("SUCCESS", f"Notiskanal {tag} borttagen för guild {ctx.guild.id}")
+            await ctx.send(f"```ansi\n{GREEN}Lyckat{RESET}. Notiskanal {tag} borttagen.```")
+        elif r_type == "info":
+            user = user_ids[ctx.guild.id].get(ctx.author.name)
+            if user is None:
+                await ctx.send("Du har inte registrerat någon information...")
+                return
+            del user_ids[ctx.guild.id][ctx.author.name]
+            log("SUCCESS", f"Information för individ {ctx.author.id} borttagen.")
+            await ctx.send("Jag har nu raderat din information.")
+        elif r_type == "calendar":
+            perm = discord.utils.get(ctx.guild.roles, name=high_perm)
+            if perm not in ctx.author.roles:
+                await ctx.send("Vem tror du att du är? Du har förbanne mig inte tillåtelse att använda det kommandot.")
+                return
+            if ctx.guild is None:
+                await ctx.send("Detta kommando kan endast användas på en server.")
+                return
+            calendars = announcement_channels[ctx.guild.id]["calendar"]
+            calendar = calendars.get(tag)
+            if calendar is None:
+                await ctx.send(f"Kalender för {tag} är inte registrerad för denna server.")
+                return
+            del calendars[tag]
+            log("SUCCESS", f"Kalender {tag} borttagen från guild {ctx.guild.id}")
+            await ctx.send(f"```ansi\n{GREEN}Lyckat{RESET}. Kalender {tag} är nu borttagen.```")
+        elif r_type == "sumup":
+            perm = discord.utils.get(ctx.guild.roles, name=high_perm)
+            if perm not in ctx.author.roles:
+                await ctx.send("Vem tror du att du är? Du har förbanne mig inte tillåtelse att använda det kommandot.")
+                return
+            if ctx.guild is None:
+                await ctx.send("Detta kommando kan endast användas på en server.")
+                return
+            data = announcement_channels[ctx.guild.id]["sumup"]
+            if not data:
+                await ctx.send("Denna server har inte länkat ett sumup konto.")
+                return
+            data.clear()
+            log("SUCCESS", f"Sumup konto för guild {ctx.guild.id} raderad.")
+            await ctx.send(f"```ansi\n{GREEN}Lyckat{RESET}. Koppling till Sumup konto raderad.```")
+        elif r_type == "bank":
+            perm = discord.utils.get(ctx.guild.roles, name=high_perm)
+            if perm not in ctx.author.roles:
+                await ctx.send("Vem tror du att du är? Du har förbanne mig inte tillåtelse att använda det kommandot.")
+                return
+            if ctx.guild is None:
+                await ctx.send("Detta kommando kan endast användas på en server.")
+                return
+            data = announcement_channels[ctx.guild.id]["bank"]
+            if not data:
+                await ctx.send("Denna server har inte registrerat sina bank information.")
+                return
+            data.clear()
+            log("SUCCESS", f"Bank information för guild {ctx.guild.id} raderad.")
+            await ctx.send(f"```ansi\n{GREEN}Lyckat{RESET}. Bank information raderad.```")
+    except Exception as e:
+        log("FAILURE", f"Fel inträffade vid avregistrering av {r_type}: {e}")
+        await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Fel inträffade vid avregistrering av {r_type}: {e}```")
+        return
 
 @bot.command()
 async def registration(ctx, tag):
@@ -720,7 +922,10 @@ async def registration(ctx, tag):
         info_styret = f"<#{announcement_channels[ctx.guild.id]["announcement"].get("info-styret")}>" if announcement_channels[ctx.guild.id]["announcement"].get("info-styret") is not None else None
         info_sektionen = f"<#{announcement_channels[ctx.guild.id]["announcement"].get("info-sektionen")}>" if announcement_channels[ctx.guild.id]["announcement"].get("info-sektionen") is not None else None
         cal_events = True if announcement_channels[ctx.guild.id]["calendar"].get("events") is not None else False
-        await ctx.send(f"# Registration {ctx.guild.name}\n## General Info\nMembers: {ctx.guild.member_count} / {ctx.guild.max_members}\nBitrate Limit: {ctx.guild.bitrate_limit}\nFilesize Limit: {ctx.guild.filesize_limit} bytes ({round(ctx.guild.filesize_limit / 1000000)} MB)\nGoogle Link: {linked}\n## Announcement Channels\nInfo-Sektionen: {info_sektionen}\nInfo-QP: {info_qp}\nInfo-QP-Intern: {info_qp_intern}\nInfo-Styret: {info_styret}\n## Calendars\nEvents: {cal_events}")
+        sumup_d = announcement_channels[ctx.guild.id]["sumup"]
+        bank = announcement_channels[ctx.guild.id]["bank"]
+        bank_c = bank["contact"] if bank.get("contact") is not None else {}
+        await ctx.send(f"# Registration {ctx.guild.name}\n## General Info\nMembers: {ctx.guild.member_count} / {ctx.guild.max_members}\nBitrate Limit: {ctx.guild.bitrate_limit}\nFilesize Limit: {ctx.guild.filesize_limit} bytes ({round(ctx.guild.filesize_limit / 1000000)} MB)\nGoogle Link: {linked}\n## Announcement Channels\nInfo-Sektionen: {info_sektionen}\nInfo-QP: {info_qp}\nInfo-QP-Intern: {info_qp_intern}\nInfo-Styret: {info_styret}\n## Calendars\nEvents: {cal_events}\n## SumUP\nMerchant Code: {sumup_d.get("merchant_code") != None}\nApi Key: {sumup_d.get("api_key") != None}\n## Bank\nBank-giro: {bank.get("bg")}\nFöreningsnamn: {bank.get("recipient")}\nOrg-nummer: {bank.get("org_number")}\nAddress: {bank.get("address")}\nPostaddress: {bank.get("post")}\n### Referens:\nNamn: {bank_c.get("name")}\nPosition: {bank_c.get("position")}\nMail: {bank_c.get("mail")}")
     elif tag == "info":
         user = user_info.get(ctx.author.id)
         if user is None:
@@ -846,7 +1051,7 @@ async def setup(ctx):
 
     await ctx.send(f"```ansi\n{CYAN}Meddelande{RESET}. För att registrera notiskanaler, vänligen använd följande kommando: !register```")
 
-    await ctx.send(f"```ansi\n{CYAN}Meddelande{RESET}. För att använda google funktioner, vänligen använd följande kommando: !regregister```")
+    await ctx.send(f"```ansi\n{CYAN}Meddelande{RESET}. För att använda google funktioner, vänligen använd följande kommando: !reggoogle```")
 
     owner = ctx.guild.owner
     if owner is None:
@@ -859,8 +1064,12 @@ async def setup(ctx):
     await ctx.send(f"```ansi\n{GREEN}Lyckat{RESET}. Setup för server {YELLOW}{ctx.guild.id}{RESET} avklarad. Använd !helpme för lista av kommandon.```")
 
 @bot.command()
-async def earnings(ctx, mode = None, days = None, limit = 0, start = None, end = None):
+async def earnings(ctx, mode = None, days = None, start = None, end = None, limit = 0):
     log("NOTICE", "Hämtar resultat från SumUp...")
+    perm = discord.utils.get(ctx.guild.roles, name=medium_perm)
+    if perm not in ctx.author.roles:
+        await ctx.send("Vem tror du att du är? Du har förbanne mig inte tillåtelse att använda det kommandot.")
+        return
     api_key = announcement_channels[ctx.guild.id]["sumup"].get("api_key")
     merchant_code = announcement_channels[ctx.guild.id]["sumup"].get("merchant_code")
     if api_key is None:
@@ -878,9 +1087,9 @@ async def earnings(ctx, mode = None, days = None, limit = 0, start = None, end =
                 log("FAILURE", "ValueError för inmatning av data för !earnings")
                 return
         if days:
-            transactions = sumup.get_transactions(api_key, merchant_code, days, limit, start)
+            transactions = sumup.get_transactions(api_key, merchant_code, days, limit, start, end)
         else:
-            transactions = sumup.get_transactions(api_key, merchant_code, limit=limit, _start=start)
+            transactions = sumup.get_transactions(api_key, merchant_code, limit=limit, _start=start, _end=end)
     except requests.exceptions.Timeout:
         log("FAILURE", "SumUp request timed out.")
         await ctx.send(f"```ansi\n{CYAN}Meddelande{RESET}. SumUp tog för lång tid att svara. Avbryter...```")
@@ -896,19 +1105,41 @@ async def earnings(ctx, mode = None, days = None, limit = 0, start = None, end =
     await ctx.send(f"```ansi\n{CYAN}Meddelande{RESET}. Inhämtar senaste {limit if limit != 0 else f'{len(transactions)}'} transaktionerna för {ctx.guild.name} under de senaste {hours}h{f' för filter "{mode}".' if mode is not None else '.'} Detta kan ta en stund...```")
 
     try:
-        products = sumup.get_transaction_details(api_key, merchant_code, mode, days, limit, start, end)
+        products, customer_ids = await asyncio.to_thread(sumup.get_transaction_details, api_key, merchant_code, mode, days, limit, start, end)
+        #update_leaderboard(customer_ids)
+
+        customers = {}
+        for customer, details in customer_ids.items():
+            customers[customer] = [customer, 0]
+            for product, prices in details.get("purchases").items():
+                for price, amount in prices.items():
+                    customers[customer][1] += float(price) * int(amount)
+        _leaderboard = sorted(customers.values(), key=lambda x: x[1], reverse=True)
+
         total = 0
         for product in products.values():
             total += product[2] * product[1]
         products = sorted(products.values(), key=lambda x: x[1], reverse=True)
         message = f"# Resultat {hours}h för {ctx.guild.name}. {limit if limit != 0 else f'{len(transactions)}'} transaktioner{f' filtrerat efter "{mode}".' if mode is not None else '.'}\nTotalt: {total} SEK"
         message += "\n## Produkter:"
+        counter = 1
         for sale in products:
-            message += f"\n{sale[0].capitalize()}: x{sale[1]}, {sale[1]*sale[2]} SEK"
+            message += f"{'\n' if counter else ''}{sale[0].capitalize()}: x{sale[1]}, {sale[1]*sale[2]} SEK"
+            counter = len(message)
+            if counter >= 1800:
+                await ctx.send(message)
+                counter = 0
+                message = ""
+        if counter != 0:
+            await ctx.send(message)
+        message = "\n## Storspenderare:"
+        for i, customer in enumerate(_leaderboard[:10]):
+            message += f"\n{i}. {customer[0]}: {customer[1]} SEK"
         await ctx.send(message)
         log("SUCCESS", f"Resultat för guild {ctx.guild.id} hämtad och skickad.")
     except Exception as e:
         log("FAILURE", f"Fel uppstod vid imhämtning av SumUp produkter: {e}")
+        await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Fel uppstod vid imhämtning av SumUp produkter: {e}```")
 
 @bot.command()
 async def rec(ctx, *, a_type):
@@ -983,7 +1214,15 @@ async def qr(ctx, link, department = None):
 
 @bot.command()
 async def invoice(ctx):
+    perm = discord.utils.get(ctx.guild.roles, name=high_perm)
+    if perm not in ctx.author.roles:
+        await ctx.send("Vem tror du att du är? Du har förbanne mig inte tillåtelse att använda det kommandot.")
+        return
     bankinfo = announcement_channels[ctx.guild.id].get("bank")
+    if bankinfo.get("bg") is None or bankinfo.get("contact") is None:
+        log("WARNING", "Kan inte skapa faktura pågrund av bristande information.")
+        await ctx.send("Denna server har inte registrerat sin bank information ännu. Vänligen använd följande kommando: ```!register bank```")
+        return
     questions = {
         "due": "När ska fakturan vara betald? (YYYY-MM-DD)",
         "c_ref_name": "Vem är din kunds referens?",
@@ -1055,7 +1294,7 @@ async def invoice(ctx):
             transactions = await asyncio.to_thread(sumup.get_transactions, api_key, merchant_code, 0, 0, sumup_a["start"], sumup_a["end"])
             await ctx.send(f"```ansi\n{CYAN}Meddelande{RESET}. Inhämtar senaste {len(transactions)} transaktionerna för {ctx.guild.name} under period {sumup_a['start']} - {sumup_a['end']}{f' för filter "{sumup_a["filter"]}".' if not sumup_a['filter'] else '.'} Detta kan ta en stund...```")
             try:
-                products = await asyncio.to_thread(sumup.get_transaction_details, api_key, merchant_code, sumup_a["filter"], 0, 0, sumup_a["start"], sumup_a["end"])
+                products, foo = await asyncio.to_thread(sumup.get_transaction_details, api_key, merchant_code, sumup_a["filter"], 0, 0, sumup_a["start"], sumup_a["end"])
                 for product in products.values():
                     if product[0] in items:
                         items[product[0]].quantity += int(product[1])
@@ -1132,6 +1371,166 @@ async def invoice(ctx):
             log("FAILURE", f"Kunde inte hitta fil {filepath}")
         save_registry()
 
+@bot.command()
+async def remind(ctx, group, preset, *, args = ""):
+    log("NOTICE", f"Påbörjar påminnelse till {group}")
+    perm = discord.utils.get(ctx.guild.roles, name=medium_perm)
+    if perm not in ctx.author.roles:
+        await ctx.send("Vem tror du att du är? Du har förbanne mig inte tillåtelse att använda det kommandot.")
+        return
+    mentions = []
+    if group.lower() == "@everyone":
+        try:
+            members = user_ids[ctx.guild.id].values()
+            for _member in members:
+                member = ctx.guild.get_member(_member)
+                if member.bot:
+                    continue
+                mentions.append(member)
+        except Exception as e:
+            log("FAILURE", f"{e}")
+    else:
+        try:
+            role = await commands.RoleConverter().convert(ctx, group)
+            for _member in user_ids[ctx.guild.id].values():
+                member = ctx.guild.get_member(_member)
+                if role in member.roles:
+                    mentions.append(member)
+        except commands.BadArgument:
+            await ctx.send(f"Kunde inta rollen {group}")
+            return
+    if preset == "nick":
+        for member in mentions:
+            if member.nick:
+                continue
+            approved = await y_or_n(ctx, f"Vill du påminna denna person: {member.display_name}")
+            if not approved:
+                try:
+                    await member.edit(nick=member.display_name)
+                except Exception as e:
+                    await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Fel inträffade vid påminnelse: {e}```")
+                continue
+            try:
+                await member.send(f"Hej, jag vill påminna att du måste byta ditt namn på servern {ctx.guild.name} till en eller flera av följande:\n- Ditt riktiga namn\n- Ditt ovve namn\n- Din position/roll inom sektionen\n\nOm inte detta görs riskerar du att bli kickad.")
+                await ctx.send(f"```ansi\n{GREEN}Lyckat{RESET}. Individ {member.id} har blivit påmind.```")
+            except Exception as e:
+                await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Fel inträffade vid påminnelse: {e}```")
+    elif preset == "role":
+        roles = []
+        for role in args.split(","):
+            try:
+                roles.append(discord.utils.get(ctx.guild.roles, name=role.strip()))
+            except Exception as e:
+                await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Fel inträffade vid påminnelse: {e}```")
+        for member in mentions:
+            has_role = False
+            for role in roles:
+                if role in member.roles:
+                    has_role = True
+                    break
+            if not has_role:
+                await member.send(f"Hej, jag vill påminna att du måste klicka i om du är en Sektions Medlem eller inte på servern {ctx.guild.name}. Vänligen gå till servern och klicka på Server Namnet och sedan 'Channels & Roles'\n\nOm inte detta görs riskerar du att bli kickad.")
+                await ctx.send(f"```ansi\n{GREEN}Lyckat{RESET}. Påminnelse skickat till användare: {member.display_name} ({member.id})```")
+    await ctx.send(f"```ansi\n{GREEN}Lyckat{RESET}. Påminnelser till {group} skickade.```")
+    log("SUCCESS", f"Skickade påminnelser till {group}")
+
+@bot.command()
+async def calendar(ctx, mode="", group="", *, args=""):
+    log("NOTICE", "Påbörjar hantering av kalenderevent")
+    perm = discord.utils.get(ctx.guild.roles, name=medium_perm)
+    if perm not in ctx.author.roles:
+        await ctx.send("Vem tror du att du är? Du har förbanne mig inte tillåtelse att använda det kommandot.")
+        return
+    creds = google_auth.get(ctx.guild.id)
+    if creds is None:
+        await ctx.send("Inget google konto är kopplad till denna guild. Använd !reggoogle för att registrera ett google konto.")
+        return
+    if not mode or (mode != "remove" and (not group or not args)):
+        await ctx.send("För att använda detta kommando skriv som följande:\n" \
+        "```!calendar mode group event_name, start_time, end_time```\n" \
+        "Där:\n- mode\n  - det du vill göra, t.ex *create*, *move*, *remove*" \
+        "\n- group\n  - namnet på kalendern, t.ex *qp*, *styret*." \
+        "\n- event_name\n  - namnet på eventet du vill skapa" \
+        "\n- start_time\n  - start tiden i följande syntax: *hh:mm DD/MM/YYYY*, t.ex *17:17 02/11/2026*" \
+        "\n- end_time\n  - slut tiden i följande syntax: *hh:mm DD/MM/YYYY*")
+        return
+    try:
+        if mode == "create":
+            event_name, start_time, end_time = args.split(",")
+            calendar_id = announcement_channels[ctx.guild.id]["calendar"].get(group)
+            if calendar_id is None:
+                await ctx.send(f"Ingen kalender har blivit registrerad för {group}. Vänligen använd ```!register calendar {group.lower()} 'kalenderlänk'```")
+                return
+            
+            start_date = datetime.strptime(start_time.strip(), "%H:%M %d/%m/%Y")
+            end_date = datetime.strptime(end_time.strip(), "%H:%M %d/%m/%Y")
+            google_event = await asyncio.to_thread(google_sheet.create_event, creds, calendar_id, event_name.strip(), start_date, end_date)
+            event_id = google_event["id"]
+            message = await ctx.send(f"# Nytt Styrelse Event\n**{event_name.strip().capitalize()}** den **{start_date.strftime('%d/%m %H:%M')}** har lags till kalendern för {group}! Vilka har tänkt gå?")
+
+            await message.add_reaction("☑️")
+            await message.add_reaction("❌")
+
+            calendar_registrations[str(message.id)] = {
+                "guild_id": ctx.guild.id,
+                "calendar_id": calendar_id,
+                "event_id": event_id,
+                "event_time": start_date.isoformat(),
+                "approved": [],
+                "rejected": []
+            }
+            log("SUCCESS", f"Google Kalender event för {group} skapat!")
+        elif mode == "move":
+            if not isinstance(ctx.message.reference, discord.MessageReference):
+                await ctx.send("Du måste svara på det ursprungliga kalendermeddelandet för att flytta eventet.")
+                return
+            start_time, end_time = args.split(",")
+            start_date = datetime.strptime(start_time.strip(), "%H:%M %d/%m/%Y")
+            end_date = datetime.strptime(end_time.strip(), "%H:%M %d/%m/%Y")
+            reference = str(ctx.message.reference.message_id)
+
+            registration = calendar_registrations.get(reference)
+            if registration is None:
+                await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Refererade meddelandet är inte registrerat som ett event.```")
+                return
+            
+            calendar_id = announcement_channels[ctx.guild.id]["calendar"].get(group)
+            if calendar_id is None:
+                await ctx.send(f"Ingen kalender har blivit registrerad för {group}. Vänligen använd ```!register calendar {group.lower()} 'kalenderlänk'```")
+                return
+
+            google_event = await asyncio.to_thread(google_sheet.move_event, creds, calendar_id, registration["event_id"], start_date, end_date)
+            registration["calendar_id"] = calendar_id
+            registration["event_time"] = start_date.isoformat()
+
+            message = await ctx.send(f"# Updatering för {group} event\nEventet **{google_event["summary"]}** har flyttats till **{start_date.strftime('%H:%M %d/%m%Y')}**\nVilka har fortfarande möjlighet att gå?")
+            await message.add_reaction("☑️")
+            await message.add_reaction("❌")
+            calendar_registrations[str(message.id)] = registration
+            del calendar_registrations[str(reference)]
+
+            log("SUCCESS", f"Google Kalender event för {group} har flyttats!")
+        elif mode == "remove":
+            if not isinstance(ctx.message.reference, discord.MessageReference):
+                await ctx.send("Du måste svara på det ursprungliga kalendermeddelandet för att flytta eventet.")
+                return
+            reference = str(ctx.message.reference.message_id)
+            registration = calendar_registrations.get(reference)
+            if registration is None:
+                await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Refererade meddelandet är inte registrerat som ett event.```")
+                return
+
+            approved = await y_or_n(ctx, f"Är du säker på att du vill radera event **{registration["event_id"]}**?")
+            if not approved:
+                await ctx.send(f"```ansi\n{CYAN}Meddelande{RESET}. Avbryter radering av event.```")
+                return
+            await asyncio.to_thread(google_sheet.delete_event, creds, registration["calendar_id"], registration["event_id"])
+            del calendar_registrations[reference]
+            await ctx.send(f"```ansi\n{GREEN}Lyckat{RESET}. Event {registration["event_id"]} har raderats.```")
+        save_calendars()
+    except Exception as e:
+        await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. {e}```")
+        log("FAILURE", f"Fel uppstod vid kalenderevent {group}: {e}")
 # ERRORS
         
 # REMINDERS
@@ -1144,7 +1543,7 @@ async def remind_event():
         for event in guild.scheduled_events:
             try:
                 if str(event.id) in reminders:
-                    log("NOTICE", f"{event.name} har redan fått en påminnelse, skippar...")
+                    #log("NOTICE", f"{event.name} har redan fått en påminnelse, skippar...")
                     continue
                 #log("NOTICE", f"Förbereder påminnelse för {event.name}")
                 description = event.description.lower()
@@ -1173,7 +1572,7 @@ async def remind_event():
                     worker_notis = []
                     if workers:
                         for worker in workers.split(","):
-                            user = bot.get_user(user_ids[guild.id][worker])
+                            user = bot.get_user(user_ids[guild.id][worker.strip()])
                             if user:
                                 worker_notis.append(user)
 
@@ -1200,6 +1599,8 @@ async def remind_event():
                         await channel.send(messages_first[version_first])
                         if worker_notis:
                             await channel.send(messages_second[version_second])
+                        if hasattr(event, "url"):
+                            await channel.send(f"{event.url}")
                     else:
                         log("FAILURE", f"Kunde inte hitta notiskanal för 'qlubbmästeriet utlysande' i guild {guild.id}")
                         continue
@@ -1257,6 +1658,19 @@ async def remind_event():
                     channel = bot.get_channel(announcement_channels[guild.id]["announcement"]["info-sektionen"])
                     if channel:
                         await channel.send(f"{role.mention} Hoppas fracken och klänningarna är rena, för som ni bör veta är det ju {event.name} om {minutes} minuter. Om ni inte har anmält er får ni inte komma, men det visste ni ju redan. Se till att ni tar en liten fördrink så att halsen är smörjad för sång!")
+                        if hasattr(event, "url"):
+                            await channel.send(f"{event.url}")
+                    else:
+                        log("FAILURE", f"Kunde inte hitta notiskanal för 'info-sektionen' i guild {guild.id}")
+                        continue
+                elif event_type == "sport":
+                    channel = announcement_channels[guild.id]["announcement"].get("info-sektionen")
+                    if channel is None:
+                        log("FAILURE", f"Kunde inte hitta notiskanal för 'info-sektionen' i guild {guild.id}")
+                        continue
+                    channel = bot.get_channel(announcement_channels[guild.id]["announcement"]["info-sektionen"])
+                    if channel:
+                        await channel.send(f"{role.mention} Hoppas dojorna står framme och träningströjan är ren, för som ni bör veta är det ju {event.name} om {minutes} minuter. Notera vart aktiviteten tar plats och befinn er gärna i tid! Det är dags att få pulsen förhöjd, och kanske utan alkohol denna gång.")
                         if hasattr(event, "url"):
                             await channel.send(f"{event.url}")
                     else:
@@ -1355,10 +1769,10 @@ async def check_forms():
     save_reminders()
 
 async def remind_calendar():
-    now = datetime.now(timezone.utc)
+    now = datetime.now(ZoneInfo("Europe/Stockholm"))
     today = datetime.today().weekday()
     #log("NOTICE", "Läser kalendrar...")
-    if today != 0 or not time(7, 0) <= now.time() <= time(7, 2):
+    if today != 0 or not time(7, 0) <= now.time() <= time(7, 1):
         return      # Skip if it's not monday or time is not around 7
     for guild in bot.guilds:
 
@@ -1437,5 +1851,79 @@ async def remind_calendar():
         except Exception as e:
             log("FAILURE", f"Error inträffade i guild {guild.id}: {e}")
 
+@bot.event
+async def on_raw_reaction_add(payload):
+    #log("NOTICE", "Påbörjar Reaction Add")
+    try:
+        if payload.user_id == bot.user.id:
+            return
+        
+        registration = calendar_registrations.get(str(payload.message_id))
+        if registration is None:
+            return
+
+        emoji = str(payload.emoji)
+        if emoji not in ("☑️", "❌"):
+            return
+
+        user = bot.get_user(payload.user_id)
+        if user is None:
+            user = await bot.fetch_user(payload.user_id)
+
+        if emoji == "☑️":
+            if payload.user_id not in registration["approved"]:
+                registration["approved"].append(payload.user_id)
+
+            if payload.user_id in registration["rejected"]:
+                registration["rejected"].remove(payload.user_id)
+        elif emoji == "❌":
+            if payload.user_id not in registration["rejected"]:
+                registration["rejected"].append(payload.user_id)
+            if payload.user_id in registration["approved"]:
+                registration["approved"].remove(payload.user_id)
+        await update_calendar(registration)
+        save_calendars()
+    except Exception as e:
+        log("FAILURE", f"Fel uppstod vid Raw Reaction: {e}")
+
+@bot.event
+async def on_scheduled_event_create(event):
+    guild = event.guild
+    description = event.description
+    event_type, reminder, event_manager = get_type(description.lower())
+
+    calendar_id = announcement_channels[guild.id]["calendar"].get(event_manager.strip().lower())
+    if calendar_id is None:
+        log("WARNING", f"Kan inte skapa google event då kalender {event_manager.strip().lower()} inte finns.")
+        return
+
+    creds = google_auth.get(guild.id)
+    if creds is None:
+        log("WARNING", f"Kan inte skapa google event då guild {guild.id} inte har länkat ett google konto.")
+        return
+
+    google_event = google_sheet.create_event(creds, calendar_id, event.name, event.start_time, event.end_time, description)
+    calendar_registrations[str(event.id)] = {
+        "guild_id": guild.id,
+        "calendar_id": calendar_id,
+        "event_id": google_event.id,
+        "approved": [],
+        "rejected": []
+    }
+    save_calendars()
+    log("SUCCESS", f"Event {event.id} har nu lagts till till kalender {calendar_id} och har id {google_event.id}")
+
+@bot.event
+async def on_scheduled_event_update(before, after):
+    registration = calendar_registrations.get(str(after.id))
+    if registration is None:
+        return
+
+    creds = google_auth.get(after.guild.id)
+    if creds is None:
+        return
+
+    await asyncio.to_thread(google_sheet.update_event, creds, registration["calendar_id"], registration["event_id"], after.description)
+    log("SUCCESS", f"Event {after.id} har uppdaterats i kalendern {registration["calendar_id"]}")
 
 bot.run(token, log_handler=handler, log_level=logging.DEBUG)
