@@ -21,7 +21,7 @@ def get_transactions(api_key, merchant_code, history=0, limit=0, _start = None, 
     else:
         end = datetime.now(ZoneInfo("Europe/Stockholm"))
     if history and _start is None:
-        today = datetime.now() - timedelta(days=history)
+        today = today - timedelta(days=history)
     start = datetime.combine(today, time.min, tzinfo=ZoneInfo("Europe/Stockholm"))
     if limit == 0:
         limit = 100000
@@ -41,12 +41,19 @@ def get_transactions(api_key, merchant_code, history=0, limit=0, _start = None, 
     response.raise_for_status()
     return response.json()["items"]
 
-def get_transaction(api_key, merchant_code, transaction_id):
+def get_transaction(api_key, merchant_code, transaction_id=None, transaction_code=None):
     url = f"https://api.sumup.com/v2.1/merchants/{merchant_code}/transactions"
 
-    params = {
-        "id": transaction_id
-    }
+    if transaction_id:
+        params = {
+            "id": transaction_id
+        }
+    elif transaction_code:
+        params = {
+            "transaction_code": transaction_code
+        }
+    else:
+        raise ValueError("Transaktions ID eller Kod saknas...")
 
     headers = {
         "Authorization": f"Bearer {api_key}"
@@ -62,16 +69,23 @@ def get_transaction_details(api_key, merchant_code, mode=None, history=0, limit=
     with ThreadPoolExecutor(max_workers=10) as executor:
         results = executor.map(get_transaction, repeat(api_key), repeat(merchant_code), (transaction["transaction_id"] for transaction in transactions))
         # leaderboard = {
-        #   "guild_id": {
-        #       "customer_id": {
-        #           "purchases": {
-        #               "product": {
-        #                   price: amount
-        #                },
-        #           },
-        #           "last_updated": "datetime",
-        #           "digits": "0000",
-        #           "user_id": "12345678"
+        #   "year": {
+        #       "type": {
+        #           "guild_id": {
+        #               "customer_ids": {
+        #                  "customer_id": {
+        #                   "purchases": {
+        #                      "product": {
+        #                          price: amount
+        #                          },
+        #                     },
+        #                    "last_updated": "datetime",
+        #                    "digits": "0000",
+        #                 "user_id": "12345678"
+        #                  }
+        #               },
+        #            "last_updated": "datetime"
+        #           }
         #       }
         #   }
         # }
@@ -84,7 +98,12 @@ def get_transaction_details(api_key, merchant_code, mode=None, history=0, limit=
             digits = card.get("last_4_digits")
             ref = card.get("payment_account_reference")
             if ref not in customer_ids:
-                customer_ids[ref] = {"purchases": {}, "last_updated": details.get("timestamp"), "digits": digits, "user_id": ""}
+                customer_ids[ref] = {
+                    "purchases": {}, 
+                    "last_updated": details.get("timestamp"), 
+                    "digits": digits, 
+                    "user_id": ""
+                    }
             else:
                 pass
                 # Update date

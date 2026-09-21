@@ -19,6 +19,8 @@ from PIL import Image
 import sumup
 import requests
 import asyncio
+import tempfile
+import fitz
 
 init(autoreset=True)
 
@@ -36,7 +38,7 @@ reminders = {}
 weekly_reminders = {}
 missions = {}       # guild_id: {public: private}
 calendar_registrations = {}     # {message_id: {data}}
-leaderboard = {}
+g_leaderboard = {}
 
 DAYS = {
     "monday": "Måndag",
@@ -72,6 +74,29 @@ class Item():
         self.quantity = quantity
 
 # LOGIC
+def get_user(sumup_id):
+    for user, data in user_info.items():
+        user_sumup_id = data.get("sumup_id")
+        if user_sumup_id is None:
+            continue
+        if user_sumup_id == sumup_id:
+            return user
+    return None
+
+def check_dup_digits(customer_ids):
+    duplicates = {}     # digits: [customer_refs]
+    for customer_id, data in customer_ids.items():
+        if data["digits"] in duplicates:
+            duplicates[data["digits"]].append(customer_id)
+        else:
+            duplicates[data["digits"]] = [customer_id]
+    duplicate_digits = []
+    for digit, customers in duplicates.items():
+        if len(customers) <= 1:
+            continue
+        duplicate_digits.append((digit, customers))
+    log("NOTICE", f"{len(duplicate_digits)} dupletter funna av registrerade kreditnummer.")
+
 async def update_calendar(registration):
     log("NOTICE", "Påbörjar uppdatering av kalender")
     approved = registration["approved"]
@@ -92,7 +117,7 @@ async def update_calendar(registration):
     else:
         description += "Ingen ännu."
 
-    await asyncio.to_thread(google_sheet.update_event, google_auth[registration["guild_id"]], registration["calendar_id"], registration["event_id"], description)
+    await asyncio.to_thread(google_sheet.update_event, google_auth[registration["guild_id"]], registration["calendar_id"], registration["event_id"], description, registration["event_time"], registration["end_time"])
 
 def get_type(description):
     event_type = ""
@@ -122,7 +147,7 @@ def get_type(description):
         event_type, reminder, event_manager = _contents
     else:
         event_type, reminder, event_manager = contents
-    return event_type, reminder, event_manager
+    return event_type.lower(), reminder, event_manager.lower()
 
 async def y_or_n(ctx, question):
     message = await ctx.send(f"{ctx.author.mention}\n{question}")
@@ -172,6 +197,10 @@ def save_calendars():
     with open("calendars.json", "w", encoding="utf-8") as f:
         json.dump(calendar_registrations, f, indent=4, ensure_ascii=False)
 
+def save_leaderboard():
+    with open("leaderboards.json", "w", encoding="utf-8") as f:
+        json.dump(g_leaderboard, f, indent=4, ensure_ascii=False)
+
 def log(category: str, msg: str) -> None:
     category = category.upper()
     if category == "WARNING":
@@ -195,6 +224,21 @@ def get_channel(guild, name):
         channel_name = channel
         if channel_name == name.lower():
             return _id       # Return if direct match
+        if len(name) > len(channel_name):
+            continue
+        # Check for partial full match
+        counter = 0
+        matched = 0
+        for c in channel_name:
+            while counter < len(name):
+                if c == name.lower()[counter]:
+                    matched += 1
+                    counter += 1
+                    break
+                counter += 1
+        if matched / len(channel_name) >= 0.8:
+            return channels[channel]
+        # Split name
         for part in channel_name.split("-"):
             if part in name.lower():
                 partial_matches.append(channel)
@@ -299,9 +343,6 @@ async def qr_gen(name, link, img, color):
     except Exception as e:
         log("FAILURE", f"Fel inträffade vid QRkod skapelse: {e}")
 
-def update_leaderboard(customer_ids):
-    for customer, details in customer_ids.items():
-        pass
 # SAVEFILES
 if os.path.exists("guild_credentials.json"):
     log("NOTICE", "Läser in Google Service Account Credentials för registrerade guilder...")
@@ -351,8 +392,17 @@ if os.path.exists("calendars.json"):
         calendar_registrations = json.load(s)
     log("SUCCESS", "Bekräftat. Inläsning av kalendrar lyckad.")
 else:
-    calendar_registrations = {}      # event: reminded (bool)
+    calendar_registrations = {}
     log("WARNING", "Inga kalendrar kunde hittas.")
+
+if os.path.exists("leaderboards.json"):
+    log("NOTICE", "Läser in kalendrar...")
+    with open("leaderboards.json", "r", encoding="utf-8") as s:
+        g_leaderboard = json.load(s)
+    log("SUCCESS", "Bekräftat. Inläsning av leaderboards lyckad.")
+else:
+    g_leaderboard = {}
+    log("WARNING", "Inga leaderboards kunde hittas.")
 
 # INTENTS
 intents = discord.Intents.default()
@@ -370,7 +420,6 @@ async def on_ready():
         channel_ids[guild.id] = {}
         user_ids[guild.id] = {}
         missions[guild.id] = {}
-        leaderboard[guild.id] = {"pub": None}
         if guild.id not in announcement_channels:
             announcement_channels[guild.id] = {
                 "announcement": {}, 
@@ -468,25 +517,30 @@ async def thread(ctx, _channel, mission, *, _args):
         await ctx.send(f"Håll i hatten pojk, alla vet ju att {channel.name} inte är ett Forum... Testa en annan kanal innan jag blir galen av din idiokrati, det är smittsamt du vet.")
         return
 
-    tag = []
-    if mission.lower() == "y":
-        name = f"Uppdrag - {name}"
-        tag.append(discord.utils.get(channel.available_tags, name="Uppdrag"))
+    try:
+        tag = []
+        if mission.lower() == "y":
+            name = f"Uppdrag - {name}"
+            tag.append(discord.utils.get(channel.available_tags, name="Uppdrag"))
 
-    tag.append(discord.utils.get(channel.available_tags, name="EJ PÅBÖRJAD"))
+        tag.append(discord.utils.get(channel.available_tags, name="EJ PÅBÖRJAD"))
 
-    if description:
-        await channel.create_thread(
-            name=name,
-            content=f"Här är din nya tråd {ctx.author.mention}. {description}",
-            applied_tags=tag
-        )
-    else:
-        await channel.create_thread(
-            name=name,
-            content=f"Här är din nya tråd {ctx.author.mention}. Glöm inte att lägga till lämplig TAG med hjälp av !tag. Skicka en bild och använda !thumbnail för att sätta en cover bild.",
-            applied_tags=tag
-        )
+        if description:
+            await channel.create_thread(
+                name=name,
+                content=f"Här är din nya tråd {ctx.author.mention}. {description}",
+                applied_tags=tag
+            )
+        else:
+            await channel.create_thread(
+                name=name,
+                content=f"Här är din nya tråd {ctx.author.mention}. Glöm inte att lägga till lämplig TAG med hjälp av !tag. Skicka en bild och använda !thumbnail för att sätta en cover bild.",
+                applied_tags=tag
+            )
+            await ctx.send(f"```ansi\n{GREEN}Lyckat{RESET}. En ny tråd har skapats```")
+    except Exception as e:
+        log("FAILURE", f"Fel uppstod vid skapelse av !thread: {e}")
+        await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Fel uppstod vid skapelse av !thread: {e}```")
 
 @bot.command()
 async def thumbnail(ctx):
@@ -822,11 +876,50 @@ async def register(ctx, r_type: str = "", tag: str = None, value = None):
             await ctx.send(f"```ansi\n{GREEN}Lyckat{RESET}. Bank information registrerad.```")
             await ctx.send("Dåså, då har jag registrerat bank informationen. Du kan nu använda *!invoice* för att automatiskt eller manuellt skapa fakturor. Om du någonsin vill ta bort din information så kan du skriva *!unregister bank*")
             save_registry()
+        elif r_type == "leaderboard":
+            if tag == "pub":
+                api_key = announcement_channels[ctx.guild.id]["sumup"].get("api_key")
+                merchant_code = announcement_channels[ctx.guild.id]["sumup"].get("merchant_code")
+                if api_key is None:
+                    await ctx.send("Det finns ingen API nyckel kopplad till denna server. Använd *!register sumup api_key* för att registrera en nyckel.")
+                    return
+                if merchant_code is None:
+                    await ctx.send("Det finns ingen Merchant Code kopplad till denna server. Använd *!register sumup merchant_code* för att registrera en ny kod.")
+                    return
+                
+                await ctx.send("Skriv in transaktionsnummret för en av dina transaktioner.")
+                try:
+                    response = await bot.wait_for("message", timeout=300, check=check)
+                    if response.content.lower() == "avbryt":
+                        await ctx.send("Jag har inte all tid i världen... Skriv igen senare om du fortfarande är intereserad, sluta slösa min tid.")
+                        log("SUCCESS", f"Avbröt registrering för individ {ctx.author.id}")
+                        return
+                    transaction = await asyncio.to_thread(sumup.get_transaction, api_key, merchant_code, transaction_code=response.content.strip())
+                    card = transaction.get("card")
+                    if card is None:
+                        log("FAILURE", f"Inget kort kunde hittas länktad till transaktion {response.content.strip()}")
+                        await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Inget kort kunde hittas länktad till transaktion {response.content.strip()}.```")
+                        return
+                    if ctx.author.id in user_ids:
+                        user_ids[ctx.author.id]["sumup_id"] = card.get("payment_account_reference")
+                    else:
+                        user_ids[ctx.author.id] = {"sumup_id": card.get("payment_account_reference")}
+                    log("SUCCESS", f"Individ {ctx.author.id} har länkat sitt sumup konto till {card.get("payment_account_reference")}")
+                    await ctx.send(f"```ansi\n{GREEN}Lyckad{RESET}. Länk för individ {ctx.author.id} till sumup konto lyckad.```")
+                    await response.delete()
+                except requests.exceptions.HTTPError as e:
+                    log("FAILURE", f"Jag kunde inte hitta någon transaktion med id {response.content.strip()}. {e}")
+                    await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Jag kunde inte hitta någon transaktion med det id nummret: {e}```")
+                    return
+                except TimeoutError:
+                    await ctx.send("Jag har inte all tid i världen... Skriv igen senare om du fortfarande är intereserad, sluta slösa min tid.")
+                    return
         else:
             await ctx.send(f"Typen {r_type} finns inte till detta kommando... Kanske du skulle vetat om du läste dokumentationen.")
             log("FAILURE", f"Typ {r_type} finns inte i systemet.")
             return
         save_registry()
+        save_users()
     except Exception as e:
         log("FAILURE", f"Fel uppstod: {e}")
 
@@ -1078,25 +1171,30 @@ async def earnings(ctx, mode = None, days = None, start = None, end = None, limi
     if merchant_code is None:
         await ctx.send("Det finns ingen Merchant Code kopplad till denna server. Använd *!register sumup merchant_code* för att registrera en ny kod.")
         return
-    
-    try:
-        if days is not None:
-            try:
-                days = int(days)
-            except ValueError:
-                log("FAILURE", "ValueError för inmatning av data för !earnings")
-                return
-        if days:
-            transactions = sumup.get_transactions(api_key, merchant_code, days, limit, start, end)
-        else:
-            transactions = sumup.get_transactions(api_key, merchant_code, limit=limit, _start=start, _end=end)
-    except requests.exceptions.Timeout:
+
+    for i in range(3):
+        try:
+            if days is not None:
+                try:
+                    days = int(days)
+                except ValueError:
+                    log("FAILURE", "ValueError för inmatning av data för !earnings")
+                    return
+            if days:
+                transactions = sumup.get_transactions(api_key, merchant_code, days, limit, start, end)
+            else:
+                transactions = sumup.get_transactions(api_key, merchant_code, limit=limit, _start=start, _end=end)
+            break
+        except requests.exceptions.Timeout:
+            log("WARNING", "SumUp request timed out.")
+            await ctx.send(f"```ansi\n{CYAN}Meddelande{RESET}. SumUp svarade inte. Upprepar försök.```")
+        except requests.exceptions.RequestException as e:
+            log("FAILURE", f"SumUp request misslyckades: {e}")
+            await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Ett fel uppstod inom SumUp. Kontrollera att din API Key och Merchant Code är korrekt.```")
+            return
+    else:
         log("FAILURE", "SumUp request timed out.")
         await ctx.send(f"```ansi\n{CYAN}Meddelande{RESET}. SumUp tog för lång tid att svara. Avbryter...```")
-        return
-    except requests.exceptions.RequestException as e:
-        log("FAILURE", f"SumUp request misslyckades: {e}")
-        await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Ett fel uppstod inom SumUp. Kontrollera att din API Key och Merchant Code är korrekt.```")
         return
 
     hours = 24
@@ -1106,7 +1204,6 @@ async def earnings(ctx, mode = None, days = None, start = None, end = None, limi
 
     try:
         products, customer_ids = await asyncio.to_thread(sumup.get_transaction_details, api_key, merchant_code, mode, days, limit, start, end)
-        #update_leaderboard(customer_ids)
 
         customers = {}
         for customer, details in customer_ids.items():
@@ -1140,6 +1237,163 @@ async def earnings(ctx, mode = None, days = None, start = None, end = None, limi
     except Exception as e:
         log("FAILURE", f"Fel uppstod vid imhämtning av SumUp produkter: {e}")
         await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Fel uppstod vid imhämtning av SumUp produkter: {e}```")
+
+@bot.command()
+async def update(ctx, mode="", *, args=""):
+    """Update leaderboards etc, depending on 'mode'"""
+    log("NOTICE", f"Uppdaterar {mode}...")
+    try:
+        perm = discord.utils.get(ctx.guild.roles, name=medium_perm)
+        if perm not in ctx.author.roles:
+            await ctx.send("Vem tror du att du är? Du har förbanne mig inte tillåtelse att använda det kommandot.")
+            return
+        today = datetime.now(ZoneInfo("Europe/Stockholm"))
+        if mode == "leaderboard":
+            data = args.split(",")
+            if data[0].lower().strip() == "pub":
+                # If no value, check all. Otherwise 'value' == 'filter', eg. 'beer', 'cider', 'guinness'.
+                # So both categories (perhaps same as !rec, but also specific products)
+                api_key = announcement_channels[ctx.guild.id]["sumup"].get("api_key")
+                merchant_code = announcement_channels[ctx.guild.id]["sumup"].get("merchant_code")
+                if api_key is None:
+                    await ctx.send("Det finns ingen API nyckel kopplad till denna server. Använd *!register sumup api_key* för att registrera en nyckel.")
+                    return
+                if merchant_code is None:
+                    await ctx.send("Det finns ingen Merchant Code kopplad till denna server. Använd *!register sumup merchant_code* för att registrera en ny kod.")
+                    return
+
+                current_year = datetime(datetime.now().year, 1, 1)
+                current_leaderboard = g_leaderboard.get(current_year.strftime("%Y"))
+                if current_leaderboard is None:
+                    g_leaderboard[current_year.strftime("%Y")] = {
+                        "pub": {
+                            "guild_ids": {
+                                str(ctx.guild.id): {
+                                    "customer_ids": {}
+                                }
+                            },
+                            "last_updated": ""
+                        }
+                    }
+
+                if str(ctx.guild.id) not in g_leaderboard[current_year.strftime("%Y")]["pub"]["guild_ids"]:
+                    g_leaderboard[current_year.strftime("%Y")]["pub"]["guild_ids"][str(ctx.guild.id)] = {"customer_ids": {}}
+
+                last_updated = g_leaderboard[current_year.strftime("%Y")]["pub"]["guild_ids"][str(ctx.guild.id)].get("last_updated")
+                if last_updated:
+                    last_updated = datetime.fromisoformat(f"{last_updated + 'T12:00:00Z'}") + timedelta(days=1)
+                else:
+                    last_updated = current_year
+
+                global_leaderboard = g_leaderboard[current_year.strftime("%Y")]["pub"]["guild_ids"][str(ctx.guild.id)]
+                
+                for i in range(3):
+                    try:
+                        all_products, customer_ids = await asyncio.to_thread(sumup.get_transaction_details, api_key, merchant_code, None, 1, 0, last_updated.strftime(f"%Y-%m-%d"), today.strftime(f"%Y-%m-%d"))
+                        break
+                    except requests.exceptions.Timeout:
+                        log("WARNING", "SumUp request timed out.")
+                        await ctx.send(f"```ansi\n{CYAN}Meddelande{RESET}. SumUp svarade inte. Upprepar försök.```")
+                else:
+                    log("FAILURE", "SumUp request timed out.")
+                    await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. SumUp tog för lång tid att svara. Avbryter...```")
+                    return
+                
+                for customer_id, data in customer_ids.items():
+                    if customer_id not in global_leaderboard["customer_ids"]:
+                        global_leaderboard["customer_ids"][customer_id] = data
+                        continue        # If the customer is not registered, register directly
+                    customer = global_leaderboard["customer_ids"][customer_id]
+                    for name, price_data in data["purchases"].items():
+                        if name in customer["purchases"]:
+                            for price, quantity in price_data.items():
+                                if price in customer["purchases"][name]:
+                                    customer["purchases"][name][price] += quantity
+                                else:
+                                    customer["purchases"][name][price] = quantity
+                        else:
+                            customer["purchases"][name] = price_data
+                g_leaderboard[current_year.strftime("%Y")]["pub"]["guild_ids"][str(ctx.guild.id)]["last_updated"] = today.strftime(f'%Y-%m-%d')
+                log("SUCCESS", "Updatering av leaderboard för pubverksamhet lyckad.")
+                await ctx.send(f"```ansi\n{GREEN}Lyckad{RESET}. Uppdatering av leaderboard för pubverksamhet lyckad.```")
+                save_leaderboard()
+
+    except Exception as e:
+        log("FAILURE", f"Fel uppstod vid uppdatering av {mode}: {e}")
+        await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Fel uppstod vid uppdatering av {mode}: {e}```")
+
+@bot.command()
+async def leaderboard(ctx, board = "", year = "", *, args=""):
+    log("NOTICE", f"Påbörjar leaderboard utlysande för {board} {year}")
+    try:
+        if not year:
+            year = datetime(datetime.now().year, 1, 1).strftime(f"%Y")
+
+        year_leaderboard = g_leaderboard.get(year)
+        if year_leaderboard is None:
+            log("WARNING", f"Leaderboard för år {year} finns inte. Avbryter...")
+            await ctx.send(f"```ansi\n{CYAN}Meddelande{RESET}. Det finns inga leaderboards för {year}```")
+            return
+        
+        leaderboard = year_leaderboard.get(board)
+        if leaderboard is None:
+            log("WARNING", f"Leaderboard för {board} {year} finns inte. Avbryter...")
+            await ctx.send(f"```ansi\n{CYAN}Meddelande{RESET}. Det finns ingan leaderboard för {board} år {year}```")
+            return
+        
+        leaderboard = leaderboard["guild_ids"].get(str(ctx.guild.id))
+        if leaderboard is None:
+            log("WARNING", f"Leaderboard för {board} {year} finns inte för guild {ctx.guild.id}. Avbryter...")
+            await ctx.send(f"```ansi\n{CYAN}Meddelande{RESET}. Det finns ingan leaderboard för {board} år {year} för guild {ctx.guild.id}```")
+            return
+
+        local_leaderboard = []
+        if board == "pub":
+            customers = leaderboard["customer_ids"]
+            filter = None
+            if args and len(args.split(",")) == 1:
+                filter = args.split(",")[0].lower().strip()
+            for customer_id, data in customers.items():
+                customer = [customer_id, 0]
+                for product, price_data in data["purchases"].items():
+                    if filter is not None:
+                        if filter[0] == "!":
+                            if filter[1:] in product.lower().strip():
+                                continue
+                        else:
+                            if filter not in product.lower().strip():
+                                continue
+                    for price, quantity in price_data.items():
+                        customer[1] += float(price) * int(quantity)
+                local_leaderboard.append(customer)
+
+            local_leaderboard = sorted(local_leaderboard, key=lambda x: x[1], reverse=True)
+            check_dup_digits(customers)
+            message = f"# Leaderboard Pub {year}"
+            if filter is not None:
+                message += f"\n## Med filter {filter}"
+            for i, customer in enumerate(local_leaderboard):
+                if i == 20:     # Take only top 20
+                    break
+                if customer[1] <= 0:        # Skip customers with 0 SEK spent
+                    continue
+                customer_id = get_user(customer[0])
+                if customer_id is None:
+                    customer_name = "???"
+                else:
+                    try:
+                        member = ctx.guild.get_member(customer_id)
+                        customer_name = member.nick or member.name
+                    except Exception:
+                        member = await bot.fetch_user(customer_id)
+                        customer_name = member.name
+                message += f"\n{i}. {customer_name}: {customer[1]:.2f} SEK"
+            await ctx.send(message)
+
+    except Exception as e:
+        log("FAILURE", f"Fel uppstod vid leaderboard utlysande: {e}")
+        await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Fel uppstod vid leaderboard utlysande: {e}```")
+        return
 
 @bot.command()
 async def rec(ctx, *, a_type):
@@ -1353,7 +1607,7 @@ async def invoice(ctx):
 
     try:
         log("NOTICE", f"Skapar faktura för individ {ctx.author.id}...")
-        pdf.create_invoice_p(ctx.guild, bankinfo, invoice_nr, item_list, answers["due"], customer, answers["description"])
+        pdf.create_invoice(ctx.guild, bankinfo, invoice_nr, item_list, answers["due"], customer, answers["description"])
     except Exception as e:
         log("FAILURE", f"Error vid skapelse av faktura: {e}")
         return
@@ -1372,11 +1626,14 @@ async def invoice(ctx):
         save_registry()
 
 @bot.command()
-async def remind(ctx, group, preset, *, args = ""):
+async def remind(ctx, group="", preset="", *, args = ""):
     log("NOTICE", f"Påbörjar påminnelse till {group}")
     perm = discord.utils.get(ctx.guild.roles, name=medium_perm)
     if perm not in ctx.author.roles:
         await ctx.send("Vem tror du att du är? Du har förbanne mig inte tillåtelse att använda det kommandot.")
+        return
+    if not group or not preset:
+        await ctx.send("```!remind group preset args```\nPåminner användare om saker och ting.\n- group\n  - en @ för de som ska bli påminda.\n- preset\n  - nick\n    - kommer påminna alla som inte har bytt sitt nickname\n  - role\n    - tar in *args*, vilket är @ för de roller man vill att alla som är mentioned ska ha (minst en av dem).")
         return
     mentions = []
     if group.lower() == "@everyone":
@@ -1417,11 +1674,15 @@ async def remind(ctx, group, preset, *, args = ""):
                 await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Fel inträffade vid påminnelse: {e}```")
     elif preset == "role":
         roles = []
-        for role in args.split(","):
+        for _role in args.split(","):
             try:
-                roles.append(discord.utils.get(ctx.guild.roles, name=role.strip()))
+                role = await commands.RoleConverter().convert(ctx, _role)
+                roles.append(role)
             except Exception as e:
                 await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Fel inträffade vid påminnelse: {e}```")
+        if not roles:
+            await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Inga roller är registrerade för påminnelse.```")
+            return
         for member in mentions:
             has_role = False
             for role in roles:
@@ -1476,6 +1737,7 @@ async def calendar(ctx, mode="", group="", *, args=""):
                 "calendar_id": calendar_id,
                 "event_id": event_id,
                 "event_time": start_date.isoformat(),
+                "end_time": end_date.isoformat(),
                 "approved": [],
                 "rejected": []
             }
@@ -1531,6 +1793,60 @@ async def calendar(ctx, mode="", group="", *, args=""):
     except Exception as e:
         await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. {e}```")
         log("FAILURE", f"Fel uppstod vid kalenderevent {group}: {e}")
+
+@bot.command()
+async def read(ctx):
+    log("NOTICE", "Läser på om någons pdf...")
+    if ctx.message.reference is None:
+        await ctx.send("Men herregud, vad har du tänkt att jag ska läsa? Tomma intet? Du är ju verkligen inte läskunnig och det synns. Använd kommandot igen och besvara denna gång det du vill att jag ska läsa.")
+        return
+    message_id = ctx.message.reference.message_id
+    try:
+        message = await ctx.channel.fetch_message(message_id)
+    except discord.NotFound:
+        await ctx.send("Jag kunde inte hitta meddelandet du länkade...")
+        log("FAILURE", "Kunde inte hitta meddelande att läsa, avbryter...")
+        return
+    except discord.Forbidden:
+        await ctx.send("Jag har inte tillåtelse att läsa det där meddelandet, vilket är sjukt. Borde inte jag ha tillåtelse till allt?")
+        log("FAILURE", "Har inte tillgång till meddelandet, avbryter läsning...")
+        return
+
+    await ctx.send("Då börjar jag läsa...")
+    pdfs = [attachment for attachment in message.attachments if attachment.filename.lower().endswith(".pdf")]
+    if not pdfs:
+        await ctx.send("Det där meddelandet innehåller inte något material som jag kan läsa tyvärr.")
+        log("FAILURE", "Kunde inte läsa in filtyper.")
+        return
+
+    for attachment in pdfs:
+        pdf_path = None
+        image_paths = []
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp_pdf:
+                pdf_path = temp_pdf.name
+                data = await attachment.read()
+                temp_pdf.write(data)
+            pdf = fitz.open(pdf_path)
+            for page_number, page in enumerate(pdf):
+                pix = page.get_pixmap(matrix=fitz.Matrix(2,2))
+                image_path = f"{pdf_path}_{page_number}.png"
+                pix.save(image_path)
+                image_paths.append(image_path)
+            pdf.close()
+            await ctx.send("Nu har jag läst på! Här kan du se innehållet:")
+            for i in range(0, len(image_paths), 10):
+                batch =  image_paths[i:i + 10]
+                files = [discord.File(path) for path in batch]
+                await ctx.send(files=files)
+        except Exception as e:
+            log("FAILURE", f"Fel inträffade vid '!read': {e}")
+            await ctx.send(f"```ansi\n{RED}Misslyckat{RESET}. Fel inträffade vid '!read': {e}```")
+            if pdf_path and os.path.exists(pdf_path):
+                os.remove(pdf_path)
+            for image_path in image_paths:
+                if os.path.exists(image_path):
+                    os.remove(image_path)
 # ERRORS
         
 # REMINDERS
@@ -1560,7 +1876,7 @@ async def remind_event():
                     log("WARNING", "Ingen notisroll finns för Heidruns Följare, skippar...")
                     continue
                 if minutes < 0:
-                    log("WARNING", f"Event {event.name} har redan börjat eller varit, skippar...")
+                    #log("WARNING", f"Event {event.name} har redan börjat eller varit, skippar...")
                     continue
                 if event_type == "pub":
                     has_workers = description.split("[arbetare]:")
@@ -1736,9 +2052,9 @@ async def check_forms():
                     priv_thread = None
                 else:
                     user = user_ids[guild.id].get(answer.username.lower())
-                    role = discord.utils.get(guild.roles, name="🤳 Black Märquet")
+                    role = discord.utils.get(guild.roles, name="Black Märquet")
                     if role is None:
-                        log("FAILURE", "Ingen roll some heter '🤳 Black Märquet'")
+                        log("FAILURE", "Ingen roll some heter 'Black Märquet'")
                         continue
                     priv_thread = await priv_channel.create_thread(
                         name=f"Uppdrag - {answer.mission} ({answer.represent})",
@@ -1888,6 +2204,7 @@ async def on_raw_reaction_add(payload):
 
 @bot.event
 async def on_scheduled_event_create(event):
+    log("NOTICE", f"{event.name} har skapats för guild {event.guild}")
     guild = event.guild
     description = event.description
     event_type, reminder, event_manager = get_type(description.lower())
@@ -1907,6 +2224,8 @@ async def on_scheduled_event_create(event):
         "guild_id": guild.id,
         "calendar_id": calendar_id,
         "event_id": google_event.id,
+        "event_time": event.start_time,
+        "end_time": event.end_time,
         "approved": [],
         "rejected": []
     }
@@ -1915,15 +2234,19 @@ async def on_scheduled_event_create(event):
 
 @bot.event
 async def on_scheduled_event_update(before, after):
-    registration = calendar_registrations.get(str(after.id))
-    if registration is None:
-        return
+    try:
+        log("NOTICE", f"{after.name} ({before.name}) nu uppdaterats")
+        registration = calendar_registrations.get(str(after.id))
+        if registration is None:
+            return
 
-    creds = google_auth.get(after.guild.id)
-    if creds is None:
-        return
+        creds = google_auth.get(after.guild.id)
+        if creds is None:
+            return
 
-    await asyncio.to_thread(google_sheet.update_event, creds, registration["calendar_id"], registration["event_id"], after.description)
-    log("SUCCESS", f"Event {after.id} har uppdaterats i kalendern {registration["calendar_id"]}")
+        await asyncio.to_thread(google_sheet.update_event, creds, registration["calendar_id"], registration["event_id"], after.description, after.start_time, after.end_time)
+        log("SUCCESS", f"Event {after.id} har uppdaterats i kalendern {registration["calendar_id"]}")
+    except Exception as e:
+        log("FAILURE", f"Fel uppstod vid event update: {e}")
 
 bot.run(token, log_handler=handler, log_level=logging.DEBUG)

@@ -140,18 +140,7 @@ def create_reimbursement(user, _approved: bool, place: str, name: str, number: s
 
     pdf.build(content)
 
-def create_invoice_p(guild, bank, index, items, due, customer, description):
-    def get_end(date):
-        if date.strftime('%d')[1] == "1":
-            date_ending = "st"
-        elif date.strftime('%d')[1] == "2":
-            date_ending = "nd"
-        elif date.strftime('%d')[1] == "3":
-            date_ending = "rd"
-        else:
-            date_ending = "th"
-        return date_ending
-
+def create_invoice(guild, bank, index, items, due, customer, description):
     total = 0
     for item in items:
         total += item.price * item.quantity

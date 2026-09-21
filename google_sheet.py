@@ -160,12 +160,23 @@ def create_event(_creds, calendar_id, event_name, start_time, end_time, descript
     created_event = service.events().insert(calendarId=calendar_id, body=event).execute()
     return created_event
 
-def update_event(_creds, calendar_id, event_id, description, location=""):
+def update_event(_creds, calendar_id, event_id, description, start_time, end_time):
     scope = ["https://www.googleapis.com/auth/calendar"]
     creds = Credentials.from_service_account_file(_creds, scopes=scope)
     creds = creds.with_subject("bm@p-sektionen.se")
     service = build("calendar", "v3", credentials=creds)
-    updated_event = service.events().patch(calendarId=calendar_id, eventId=event_id, body={"description": description}).execute()
+    body = {
+        "description": description,
+        "start": {
+            "dateTime": start_time.isoformat(),
+            "timeZone": "Europe/Stockholm"
+        },
+        "end": {
+            "dateTime": end_time.isoformat(),
+            "timeZone": "Europe/Stockholm"
+        }
+    }
+    updated_event = service.events().patch(calendarId=calendar_id, eventId=event_id, body=body).execute()
     return updated_event
 
 def move_event(_creds, calendar_id, event_id, start_time, end_time):
